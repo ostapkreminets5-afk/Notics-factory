@@ -1,0 +1,94 @@
+.titlebar {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  justify-content: space-between;
+  height: var(--titlebar-height);
+  padding-left: 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.titlebar.is-overlay {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: var(--sidebar-width);
+  justify-content: flex-end;
+  height: 36px;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.titlebar.is-overlay .window-button {
+  width: 44px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.logo-mark {
+  width: 20px;
+  height: 20px;
+}
+
+.wordmark {
+  font-family: var(--font-display);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+}
+
+.brand-divider {
+  width: 1px;
+  height: 12px;
+  background: var(--line-strong);
+}
+
+.brand-sub {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.window-controls {
+  display: flex;
+}
+
+.window-button {
+  display: grid;
+  place-items: center;
+  width: 46px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+
+.window-button svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+.window-button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+
+.window-button.is-close:hover {
+  background: #e2333f;
+  color: #fff;
+}

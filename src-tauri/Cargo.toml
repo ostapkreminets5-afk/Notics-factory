@@ -1,0 +1,26 @@
+[package]
+name = "noctics-factory"
+version = "0.1.0"
+description = "Noctics Factory"
+authors = ["you"]
+edition = "2024"
+
+[lib]
+name = "noctics_factory_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+argon2 = "0.6"
+rusqlite = { version = "0.41", features = ["bundled"] }
+ureq = "3"
+url = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+noctics-shared = { path = "../shared" }
