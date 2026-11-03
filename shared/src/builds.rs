@@ -239,6 +239,8 @@ pub struct BuildOverview {
     pub targets: Vec<TargetReport>,
     pub builds: Vec<Build>,
     pub output_dir: String,
+    #[serde(default)]
+    pub planned: Vec<BuildTarget>,
 }
 
 impl BuildOverview {

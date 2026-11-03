@@ -770,6 +770,14 @@
   height: 13px;
 }
 
+.reference-sound {
+  color: #b3b8c4;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .pin-viewer {
   position: fixed;
   inset: 0;

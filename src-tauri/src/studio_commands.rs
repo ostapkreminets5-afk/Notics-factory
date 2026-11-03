@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use noctics_shared::{
-    CLAUDE_MODEL, ClaudeUsage, GameEngine, JournalEntry, Project, ProjectDetail, Screen,
-    SkillOutput, StudioError, StudioSettings,
+    BuildTarget, CLAUDE_MODEL, ClaudeUsage, GameEngine, JournalEntry, Project, ProjectDetail,
+    Screen, SkillOutput, StudioError, StudioSettings,
 };
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
+use crate::builder::Builder;
 use crate::commands::{ActiveSession, off_main_thread};
 use crate::skills::SkillStore;
 use crate::studio::Studio;
@@ -109,7 +110,9 @@ pub async fn project_journal(
 pub async fn start_project(
     prompt: String,
     engine: GameEngine,
+    targets: Vec<BuildTarget>,
     studio: Studios<'_>,
+    builder: State<'_, Arc<Builder>>,
     session: State<'_, ActiveSession>,
 ) -> Result<Project, StudioError> {
     guard(&session)?;
@@ -118,6 +121,7 @@ pub async fn start_project(
         studio.store.create_project(&prompt, engine)
     })
     .await?;
+    let _ = builder.plan_builds(created.id, &targets);
     studio.notify();
     studio.kick();
     Ok(created)

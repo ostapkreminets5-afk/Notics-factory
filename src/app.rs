@@ -18,6 +18,7 @@ static JOURNAL_CSS: Asset = asset!("/assets/styles/journal.css");
 static BUILD_CSS: Asset = asset!("/assets/styles/build.css");
 static ARTIFACTS_CSS: Asset = asset!("/assets/styles/artifacts.css");
 static COMFY_CSS: Asset = asset!("/assets/styles/comfy.css");
+static NODES_CSS: Asset = asset!("/assets/styles/nodes.css");
 
 #[derive(Clone, PartialEq)]
 enum Screen {
@@ -76,6 +77,7 @@ pub fn App() -> Element {
         document::Stylesheet { href: BUILD_CSS }
         document::Stylesheet { href: ARTIFACTS_CSS }
         document::Stylesheet { href: COMFY_CSS }
+        document::Stylesheet { href: NODES_CSS }
         div { class: if in_workspace { "shell is-workspace" } else { "shell" },
             Titlebar { overlay: in_workspace }
             main { class: "stage", {stage} }

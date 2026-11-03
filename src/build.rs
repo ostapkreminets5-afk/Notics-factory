@@ -620,7 +620,7 @@ fn PlanShortcuts(supported: Vec<BuildTarget>, picked: usize) -> Element {
 }
 
 #[component]
-fn PlanCard() -> Element {
+pub fn PlanCard() -> Element {
     let studio = use_studio();
     let choices: Vec<TargetChoice> = BuildTarget::ALL
         .into_iter()

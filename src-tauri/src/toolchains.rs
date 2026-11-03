@@ -364,8 +364,7 @@ fn probe_godot(exe: PathBuf) -> Option<Godot> {
     let version = output
         .lines()
         .map(str::trim)
-        .filter(|line| line.chars().next().is_some_and(|c| c.is_ascii_digit()) && line.contains('.'))
-        .last()?
+        .rfind(|line| line.chars().next().is_some_and(|c| c.is_ascii_digit()) && line.contains('.'))?
         .to_owned();
     let templates = godot_template_roots(&exe)
         .iter()

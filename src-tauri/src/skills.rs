@@ -312,9 +312,11 @@ mod tests {
                 "lore-and-naming",
                 "concept-prompts",
                 "game-ui-screens",
+                "real-art-not-vector",
                 "model-spec",
                 "material-style",
-                "game-scripts"
+                "game-scripts",
+                "vfx-forge"
             ]
         );
         let disabled: Vec<&str> = skills
@@ -331,7 +333,7 @@ mod tests {
         let store = in_memory();
         let created = store.create(&draft("animation-rhythm")).unwrap();
         assert_eq!(created.title, "Ритм анімацій");
-        assert_eq!(store.list().unwrap().len(), 8);
+        assert_eq!(store.list().unwrap().len(), 10);
 
         let mut changes = created.draft();
         changes.stage = LAST_STAGE;
@@ -351,7 +353,7 @@ mod tests {
             store.set_enabled(created.id, true),
             Err(SkillError::NotFound)
         );
-        assert_eq!(store.list().unwrap().len(), 7);
+        assert_eq!(store.list().unwrap().len(), 9);
     }
 
     #[test]
@@ -365,7 +367,7 @@ mod tests {
             store.create(&draft("Не латиниця")),
             Err(SkillError::NameInvalid)
         );
-        assert_eq!(store.list().unwrap().len(), 7);
+        assert_eq!(store.list().unwrap().len(), 9);
     }
 
     #[test]
@@ -383,7 +385,7 @@ mod tests {
         std::fs::remove_file(&database).unwrap();
         std::fs::remove_dir_all(&exports).unwrap();
 
-        assert_eq!(count, 6);
+        assert_eq!(count, 8);
     }
 
     #[test]
@@ -392,7 +394,10 @@ mod tests {
         connection.execute_batch(SCHEMA).unwrap();
         seed(&connection, 0).unwrap();
         connection
-            .execute("DELETE FROM skills WHERE name = 'game-ui-screens'", [])
+            .execute(
+                "DELETE FROM skills WHERE name IN ('game-ui-screens', 'real-art-not-vector', 'vfx-forge')",
+                [],
+            )
             .unwrap();
         connection.pragma_update(None, "user_version", 1).unwrap();
 
@@ -404,7 +409,9 @@ mod tests {
             .map(|skill| skill.name)
             .collect();
         assert!(names.iter().any(|name| name == "game-ui-screens"));
-        assert_eq!(names.len(), 7);
+        assert!(names.iter().any(|name| name == "real-art-not-vector"));
+        assert!(names.iter().any(|name| name == "vfx-forge"));
+        assert_eq!(names.len(), 9);
     }
 
     #[test]

@@ -134,6 +134,7 @@ pub struct ComfyModel {
     pub id: String,
     pub name: String,
     pub note: String,
+    pub precision: Option<String>,
     pub medium: Medium,
     pub ready: bool,
     pub missing: Vec<String>,

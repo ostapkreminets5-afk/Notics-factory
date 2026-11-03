@@ -167,6 +167,7 @@ pub struct Candidate {
     pub id: String,
     pub name: String,
     pub note: String,
+    pub precision: Option<String>,
     pub medium: Medium,
     pub rank: u8,
     pub recipe: Option<Recipe>,
@@ -234,26 +235,26 @@ pub fn roster(inventory: &Inventory) -> Vec<Candidate> {
         } else if is_ace(&name) {
             Some(ace_split(inventory, unet, &name))
         } else if name.contains("pixal3d") {
-            Some(pixal(inventory, unet, &name))
+            Some(pixal(inventory, unet))
         } else if name.contains("trellis") {
-            Some(trellis(inventory, unet, &name))
+            Some(trellis(inventory, unet))
         } else {
             None
         };
-        found.extend(candidate);
+        found.extend(candidate.map(|candidate| with_precision(candidate, &name)));
     }
     for file in inventory.in_folder(Folder::Checkpoints) {
         let name = base(file);
         let candidate = if is_ace(&name) {
             Some(ace_all_in_one(inventory, file, &name))
         } else if is_stable_audio_open(&name) {
-            Some(stable_audio(inventory, file, &name))
+            Some(stable_audio(inventory, file))
         } else if NON_IMAGE_CHECKPOINTS.iter().any(|marker| name.contains(marker)) {
             None
         } else {
             Some(checkpoint(inventory, file, &name))
         };
-        found.extend(candidate);
+        found.extend(candidate.map(|candidate| with_precision(candidate, &name)));
     }
     found.sort_by(|left, right| {
         medium_order(left.medium)
@@ -306,8 +307,9 @@ fn precision(name: &str) -> Option<&'static str> {
     PRECISIONS.into_iter().find(|marker| name.contains(marker))
 }
 
-fn with_precision(note: &str, name: &str) -> String {
-    precision(name).map_or_else(|| note.to_owned(), |marker| format!("{note} · {marker}"))
+fn with_precision(mut candidate: Candidate, name: &str) -> Candidate {
+    candidate.precision = precision(name).map(str::to_owned);
+    candidate
 }
 
 fn prefer(files: &[String], marker: &str) -> Option<String> {
@@ -369,6 +371,7 @@ impl<'a> Needs<'a> {
             id,
             name,
             note,
+            precision: None,
             medium,
             rank,
             recipe: ready.then_some(recipe),
@@ -390,7 +393,7 @@ fn z_image(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
     needs.finish(
         format!("z-image:{unet}"),
         if turbo { "Z-Image Turbo" } else { "Z-Image" }.to_owned(),
-        with_precision("Tongyi · фотореалізм і текст", name),
+        "Tongyi · фотореалізм і текст".to_owned(),
         Medium::Image,
         if turbo { 0 } else { 2 },
         Recipe::ZImage {
@@ -430,7 +433,7 @@ fn flux2(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
     needs.finish(
         format!("flux2:{unet}"),
         label,
-        with_precision("Black Forest Labs · швидкий", name),
+        "Black Forest Labs · швидкий".to_owned(),
         Medium::Image,
         1,
         Recipe::Flux2 {
@@ -516,7 +519,7 @@ fn ace_split(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
     needs.finish(
         format!("ace:{unet}"),
         label,
-        with_precision("Музика й звук", name),
+        "Музика й звук".to_owned(),
         Medium::Audio,
         if xl { 1 } else { 2 },
         Recipe::AceSplit {
@@ -529,7 +532,7 @@ fn ace_split(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
     )
 }
 
-fn stable_audio(inventory: &Inventory, file: &str, name: &str) -> Candidate {
+fn stable_audio(inventory: &Inventory, file: &str) -> Candidate {
     let mut needs = Needs::new(inventory);
     let clip = needs.file(Folder::TextEncoders, "t5-base (text encoder)", |text| {
         text.contains("t5") && text.contains("base")
@@ -538,7 +541,7 @@ fn stable_audio(inventory: &Inventory, file: &str, name: &str) -> Candidate {
     needs.finish(
         format!("stable-audio:{file}"),
         "Stable Audio Open".to_owned(),
-        with_precision("Stability AI · SFX і лупи", name),
+        "Stability AI · SFX і лупи".to_owned(),
         Medium::Audio,
         3,
         Recipe::StableAudio {
@@ -568,14 +571,14 @@ fn mesh_parts(needs: &mut Needs<'_>) -> MeshParts {
     }
 }
 
-fn trellis(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
+fn trellis(inventory: &Inventory, unet: &str) -> Candidate {
     let mut needs = Needs::new(inventory);
     let parts = mesh_parts(&mut needs);
     needs.nodes(&[&MESH_NODES, &TRELLIS_NODES]);
     needs.finish(
         format!("trellis:{unet}"),
         "TRELLIS.2".to_owned(),
-        with_precision("Microsoft · картинка → 3D", name),
+        "Microsoft · картинка → 3D".to_owned(),
         Medium::Mesh,
         0,
         Recipe::Trellis {
@@ -588,7 +591,7 @@ fn trellis(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
     )
 }
 
-fn pixal(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
+fn pixal(inventory: &Inventory, unet: &str) -> Candidate {
     let mut needs = Needs::new(inventory);
     let parts = mesh_parts(&mut needs);
     let geometry = needs.any(Folder::Geometry, "moge_2 (geometry estimation)", "moge");
@@ -596,7 +599,7 @@ fn pixal(inventory: &Inventory, unet: &str, name: &str) -> Candidate {
     needs.finish(
         format!("pixal3d:{unet}"),
         "Pixal3D".to_owned(),
-        with_precision("Картинка → 3D з нормалями й AO", name),
+        "Картинка → 3D з нормалями й AO".to_owned(),
         Medium::Mesh,
         1,
         Recipe::Pixal {
@@ -1204,6 +1207,15 @@ mod tests {
                 ("ACE-Step 1.5 XL SFT", Medium::Audio, true),
             ]
         );
+        let precisions: Vec<Option<&str>> = roster
+            .iter()
+            .map(|candidate| candidate.precision.as_deref())
+            .collect();
+        assert_eq!(
+            precisions,
+            vec![Some("int8"), Some("fp8"), Some("int8"), Some("int8"), None, Some("bf16")]
+        );
+        assert_eq!(roster[0].note, "Tongyi · фотореалізм і текст");
     }
 
     #[test]

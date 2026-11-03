@@ -107,6 +107,7 @@ pub struct SkillRef {
 
 pub struct OutputJob {
     pub output_id: i64,
+    pub project_id: i64,
     pub skill_name: String,
     pub title: String,
     pub prompt: String,
@@ -126,10 +127,12 @@ pub struct ReferenceContext {
     pub pitch: String,
     pub design_document: String,
     pub style: StyleGuide,
+    pub references: Vec<Reference>,
 }
 
 pub struct ScreenJob {
     pub screen_id: i64,
+    pub project_id: i64,
     pub game_name: String,
     pub pitch: String,
     pub design_document: String,
@@ -137,6 +140,7 @@ pub struct ScreenJob {
     pub sibling_titles: Vec<String>,
     pub title: String,
     pub summary: String,
+    pub board: Vec<Reference>,
     pub reference: Option<(String, String)>,
     pub revision: Option<(String, String)>,
 }
@@ -288,6 +292,22 @@ impl StudioStore {
         find_project(&connection, project_id)
     }
 
+    pub fn ready_for_code(&self, project_id: i64) -> Result<bool, StudioError> {
+        self.lock()?
+            .query_row(
+                "SELECT p.status IN ('designing', 'ready')
+                    AND EXISTS(SELECT 1 FROM screens s WHERE s.project_id = p.id)
+                    AND NOT EXISTS(SELECT 1 FROM screens s WHERE s.project_id = p.id AND s.status NOT IN ('draft', 'approved'))
+                    AND NOT EXISTS(SELECT 1 FROM skill_outputs o WHERE o.project_id = p.id AND o.status != 'done')
+                 FROM projects p WHERE p.id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)
+            .map(|ready| ready.unwrap_or(false))
+    }
+
     pub fn has_pending(&self) -> Result<bool, StudioError> {
         self.lock()?
             .query_row(
@@ -378,8 +398,10 @@ impl StudioStore {
             )
             .optional()
             .map_err(storage)?;
+        let board = find_project(&connection, project_id)?.references;
         Ok(Some(Job::Screen(Box::new(ScreenJob {
             screen_id,
+            project_id,
             game_name,
             pitch,
             design_document,
@@ -387,6 +409,7 @@ impl StudioStore {
             sibling_titles,
             title,
             summary,
+            board,
             reference,
             revision,
         }))))
@@ -457,6 +480,7 @@ impl StudioStore {
             pitch,
             design_document: design_document_of(&connection, project_id, brief)?,
             style: parse_style(&style_json),
+            references: project.references,
         })
     }
 
@@ -991,6 +1015,7 @@ fn claim_output(connection: &Connection, now: i64) -> Result<Option<OutputJob>, 
         .map_err(storage)?;
     Ok(Some(OutputJob {
         output_id,
+        project_id,
         skill_name,
         title,
         prompt,
@@ -1308,6 +1333,40 @@ mod tests {
         let failed = outputs.iter().find(|output| output.skill_name == "concept-prompts").unwrap();
         assert_eq!(failed.error, Some(StudioError::UsageLimit));
         assert_eq!(store.regenerate_output(failed.id).unwrap().status, OutputStatus::Queued);
+    }
+
+    #[test]
+    fn is_ready_for_code_once_every_skill_and_screen_has_a_result() {
+        let store = in_memory();
+        let project = store.create_project(PROMPT, GameEngine::Godot).unwrap();
+        assert!(!store.ready_for_code(project.id).unwrap());
+        let Some(Job::Plan { project_id, .. }) = store.claim_job().unwrap() else {
+            panic!("expected a planning job");
+        };
+        store
+            .apply_plan(project_id, &plan(), &[skill("idea-to-gdd", 1)])
+            .unwrap();
+        assert!(!store.ready_for_code(project_id).unwrap());
+        let design = claim_output_job(&store);
+        assert_eq!(design.project_id, project_id);
+        store.finish_output(design.output_id, "# GDD").unwrap();
+        let screens = store.detail(project_id).unwrap().screens.len();
+        for index in 0..screens {
+            assert!(!store.ready_for_code(project_id).unwrap());
+            let screen = claim_screen(&store);
+            assert_eq!(screen.project_id, project_id);
+            if index == 0 {
+                store.fail_screen(screen.screen_id, &StudioError::UsageLimit).unwrap();
+                assert!(!store.ready_for_code(project_id).unwrap());
+                store.retry_failed(project_id).unwrap();
+                let retried = claim_screen(&store);
+                store.finish_screen(retried.screen_id, "<html>menu</html>").unwrap();
+            } else {
+                store.finish_screen(screen.screen_id, "<html>screen</html>").unwrap();
+            }
+        }
+        assert!(store.ready_for_code(project_id).unwrap());
+        assert!(!store.ready_for_code(project_id + 100).unwrap());
     }
 
     #[test]

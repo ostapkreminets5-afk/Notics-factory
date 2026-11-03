@@ -31,7 +31,7 @@ struct Preset {
     integrated: bool,
 }
 
-const PRESETS: [Preset; 23] = [
+const PRESETS: [Preset; 18] = [
     Preset {
         id: "claude",
         slot: ToolSlot::Core,
@@ -175,46 +175,6 @@ const PRESETS: [Preset; 23] = [
         note: "Білди для ПК, вебу й телефонів",
         url: None,
         integrated: true,
-    },
-    Preset {
-        id: "godot",
-        slot: ToolSlot::Build,
-        name: "Godot",
-        note: "Відкритий рушій 2D і 3D",
-        url: Some("https://godotengine.org"),
-        integrated: false,
-    },
-    Preset {
-        id: "unity",
-        slot: ToolSlot::Build,
-        name: "Unity",
-        note: "Рушій для ПК і мобільних",
-        url: Some("https://unity.com"),
-        integrated: false,
-    },
-    Preset {
-        id: "unreal",
-        slot: ToolSlot::Build,
-        name: "Unreal Engine",
-        note: "Рушій для 3D-ігор",
-        url: Some("https://www.unrealengine.com"),
-        integrated: false,
-    },
-    Preset {
-        id: "defold",
-        slot: ToolSlot::Build,
-        name: "Defold",
-        note: "Легкий 2D-рушій",
-        url: Some("https://defold.com"),
-        integrated: false,
-    },
-    Preset {
-        id: "phaser",
-        slot: ToolSlot::Build,
-        name: "Phaser",
-        note: "Браузерні 2D-ігри",
-        url: Some("https://phaser.io"),
-        integrated: false,
     },
 ];
 
@@ -430,6 +390,23 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), PRESETS.len());
+    }
+
+    #[test]
+    fn builds_follow_the_project_engine_not_a_separate_tool() {
+        let store = in_memory();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO tool_choices (slot, tool_id) VALUES ('build', 'unreal')",
+                [],
+            )
+            .unwrap();
+        let toolbox = store.snapshot().unwrap();
+        assert_eq!(toolbox.active_tool(ToolSlot::Build).unwrap().id, "build");
+        assert_eq!(toolbox.tools_for(ToolSlot::Build).count(), 1);
+        assert_eq!(store.choose(ToolSlot::Build, "unreal"), Err(ToolError::NotFound));
     }
 
     #[test]

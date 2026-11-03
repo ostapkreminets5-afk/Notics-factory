@@ -38,7 +38,7 @@ const STAGES: [StageInfo; LAST_STAGE as usize] = [
     StageInfo {
         number: 2,
         title: "Концепт",
-        note: "Екрани, промпти концептів, референси",
+        note: "Референси Pinterest, екрани Claude Design",
         empty: "Немає навички — додай свою",
     },
     StageInfo {
@@ -62,8 +62,8 @@ const STAGES: [StageInfo; LAST_STAGE as usize] = [
     StageInfo {
         number: LAST_STAGE,
         title: "Збірка",
-        note: "Код гри і білди",
-        empty: "Код гри ще не згенеровано",
+        note: "Код, ассети ComfyUI і білди",
+        empty: "Код і ассети стартують самі, коли екрани й навички готові",
     },
 ];
 

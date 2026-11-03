@@ -1,5 +1,5 @@
 use noctics_shared::{
-    AuthError, ClaudeUsage, Credentials, GameEngine, JournalEntry, PinterestError,
+    AuthError, BuildTarget, ClaudeUsage, Credentials, GameEngine, JournalEntry, PinterestError,
     PinterestStatus, Project, ProjectDetail, Registration, Screen, Session, Skill, SkillOutput,
     SkillDraft, SkillError, StudioError, StudioSettings, ToolDraft, ToolError, ToolSlot, Toolbox,
 };
@@ -66,6 +66,7 @@ struct ReferenceArgs {
 struct StartArgs<'a> {
     prompt: &'a str,
     engine: GameEngine,
+    targets: &'a [BuildTarget],
 }
 
 #[derive(Serialize)]
@@ -287,8 +288,12 @@ pub async fn project_journal(id: i64) -> Result<Vec<JournalEntry>, StudioError> 
         .map_err(studio_error)
 }
 
-pub async fn start_project(prompt: &str, engine: GameEngine) -> Result<Project, StudioError> {
-    invoke("start_project", &StartArgs { prompt, engine })
+pub async fn start_project(
+    prompt: &str,
+    engine: GameEngine,
+    targets: &[BuildTarget],
+) -> Result<Project, StudioError> {
+    invoke("start_project", &StartArgs { prompt, engine, targets })
         .await
         .map_err(studio_error)
 }

@@ -8,15 +8,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use noctics_shared::{
-    BuildError, BuildOverview, BuildStatus, BuildTarget, GameSource, JournalEvent,
-    MAX_BUILD_REQUEST_CHARS, MAX_SOURCE_PATH_CHARS, Project, SourceOrigin, SourceStatus, StudioError,
-    TargetReport, format_size, project_marker,
+    ART_SKILL, BuildError, BuildOverview, BuildStatus, BuildTarget, GameSource, JournalEvent,
+    MAX_BUILD_REQUEST_CHARS, MAX_SOURCE_PATH_CHARS, Project, Readiness, SourceOrigin, SourceStatus,
+    StudioError, TargetReport, format_size, project_marker,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::build_store::{BuildStore, MAX_ACTIVITY, StoredBuild};
 use crate::claude_code;
 use crate::codegen::{self, Assignment, Event};
+use crate::comfy_forge::Forge;
 use crate::games_root::GamesRoot;
 use crate::process::{self, LineSink, RunFailure};
 use crate::recipes::{self, Context, GameNames, StepFailure};
@@ -49,7 +50,14 @@ pub struct Builder {
     worker: AtomicBool,
     cancelling: Mutex<HashSet<i64>>,
     stopping: Mutex<HashSet<i64>>,
+    advanced: Mutex<HashSet<i64>>,
     toolchains: Mutex<Option<(Instant, Arc<Toolchains>)>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterCode {
+    Stop,
+    BuildPlanned,
 }
 
 struct ProjectDirs {
@@ -86,6 +94,7 @@ impl Builder {
             worker: AtomicBool::new(false),
             cancelling: Mutex::new(HashSet::new()),
             stopping: Mutex::new(HashSet::new()),
+            advanced: Mutex::new(HashSet::new()),
             toolchains: Mutex::new(None),
         }
     }
@@ -126,6 +135,7 @@ impl Builder {
             targets,
             builds: self.store.builds(project_id)?,
             output_dir: dirs.builds.to_string_lossy().into_owned(),
+            planned: self.store.plan(project_id).unwrap_or_default(),
         })
     }
 
@@ -157,7 +167,58 @@ impl Builder {
         {
             return Err(BuildError::RequestTooLong);
         }
-        self.start_generation(project_id, request)
+        self.start_generation(project_id, request, AfterCode::Stop)
+    }
+
+    pub fn plan_builds(&self, project_id: i64, targets: &[BuildTarget]) -> Result<(), BuildError> {
+        self.store.set_plan(project_id, targets)
+    }
+
+    pub fn advance(self: &Arc<Self>, project_id: i64) {
+        let first = self
+            .advanced
+            .lock()
+            .is_ok_and(|mut advanced| advanced.insert(project_id));
+        if !first || !matches!(self.store.source(project_id), Ok(None)) {
+            return;
+        }
+        if self
+            .start_generation(project_id, None, AfterCode::BuildPlanned)
+            .is_err()
+            && let Ok(mut advanced) = self.advanced.lock()
+        {
+            advanced.remove(&project_id);
+        }
+    }
+
+    fn build_planned(self: &Arc<Self>, project_id: i64) {
+        let planned = self.store.plan(project_id).unwrap_or_default();
+        if planned.is_empty() {
+            return;
+        }
+        let (Ok(project), Ok(Some(source))) = (self.project(project_id), self.store.source(project_id)) else {
+            return;
+        };
+        let tools = self.toolchains(true);
+        let mut ready = Vec::new();
+        for target in planned {
+            match recipes::readiness(project.engine, target, Some(&source.path), &tools) {
+                Readiness::Ready(_) => ready.push(target),
+                Readiness::Missing(reason) | Readiness::NeedsHost(reason) => {
+                    self.journal(project_id, JournalEvent::BuildSkipped { target, reason });
+                }
+                Readiness::Unsupported => self.journal(
+                    project_id,
+                    JournalEvent::BuildSkipped {
+                        target,
+                        reason: format!("{} не збирає під цю платформу", project.engine.label()),
+                    },
+                ),
+            }
+        }
+        if !ready.is_empty() && self.queue(project_id, &ready).is_err() {
+            self.notify();
+        }
     }
 
     pub fn fix(self: &Arc<Self>, build_id: i64) -> Result<(), BuildError> {
@@ -171,7 +232,7 @@ impl Builder {
             build.target.label(),
             build.error.as_deref().unwrap_or("невідома помилка")
         );
-        self.start_generation(build.project_id, Some(request))
+        self.start_generation(build.project_id, Some(request), AfterCode::Stop)
     }
 
     pub fn stop_generation(&self, project_id: i64) {
@@ -268,7 +329,12 @@ impl Builder {
         });
     }
 
-    fn start_generation(self: &Arc<Self>, project_id: i64, request: Option<String>) -> Result<(), BuildError> {
+    fn start_generation(
+        self: &Arc<Self>,
+        project_id: i64,
+        request: Option<String>,
+        after: AfterCode,
+    ) -> Result<(), BuildError> {
         self.studio.require_connection().map_err(BuildError::Claude)?;
         let detail = self.studio.store.detail(project_id).map_err(studio_failure)?;
         let project = detail.project.clone();
@@ -281,7 +347,11 @@ impl Builder {
                 (source.path, source.origin)
             });
         std::fs::create_dir_all(&path).map_err(|error| BuildError::Process(error.to_string()))?;
-        codegen::write_brief(&dirs.brief, &detail).map_err(BuildError::Process)?;
+        let art_guide = self
+            .studio
+            .enabled_skill(ART_SKILL)
+            .map(|skill| skill.to_skill_markdown());
+        codegen::write_brief(&dirs.brief, &detail, art_guide.as_deref()).map_err(BuildError::Process)?;
         let fresh = !recipes::marker_present(project.engine, &path);
         self.store
             .begin_generation(project_id, &path, origin, project.engine)?;
@@ -307,6 +377,9 @@ impl Builder {
                 stopping.remove(&project_id);
             }
             builder.notify();
+            if error.is_none() && after == AfterCode::BuildPlanned {
+                builder.build_planned(project_id);
+            }
         });
         Ok(())
     }
@@ -321,6 +394,10 @@ impl Builder {
         let executable = claude_code::locate().ok_or("Claude Code не знайдено — встанови його в Налаштуваннях.")?;
         let tools = self.toolchains(false);
         let names = GameNames::new(&project.name);
+        let art_api = self
+            .app
+            .try_state::<Arc<Forge>>()
+            .and_then(|forge| forge.art_api());
         let assignment = Assignment {
             engine: project.engine,
             names: &names,
@@ -328,6 +405,9 @@ impl Builder {
             tools: &tools,
             request,
             fresh: !recipes::marker_present(project.engine, root),
+            project_id: project.id,
+            art_api: art_api.as_deref(),
+            art_guide: dirs.brief.join(codegen::ART_GUIDE).is_file(),
         };
         let mut command = Command::new(executable);
         command

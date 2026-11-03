@@ -474,6 +474,9 @@ fn describe(event: &JournalEvent) -> String {
             format!("Білд {} упав: {reason}", target.label())
         }
         JournalEvent::BuildCancelled { target } => format!("Білд {} скасовано", target.label()),
+        JournalEvent::BuildSkipped { target, reason } => {
+            format!("Білд {} пропущено: {reason}", target.label())
+        }
     }
 }
 

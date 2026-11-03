@@ -14,6 +14,8 @@ const FAILURE_CHARS: usize = 300;
 const CODE_TOOLS: &str = "Read,Write,Edit,Glob,Grep,Bash";
 const FALLBACK_UNITY: &str = "2022.3 LTS";
 const FALLBACK_UNREAL: &str = "5.4";
+pub const ART_GUIDE: &str = "art.md";
+const ART_PROMPTS: &str = "art/prompts.md";
 
 pub struct Assignment<'a> {
     pub engine: GameEngine,
@@ -22,6 +24,9 @@ pub struct Assignment<'a> {
     pub tools: &'a Toolchains,
     pub request: Option<&'a str>,
     pub fresh: bool,
+    pub project_id: i64,
+    pub art_api: Option<&'a str>,
+    pub art_guide: bool,
 }
 
 pub enum Event {
@@ -30,7 +35,7 @@ pub enum Event {
     Quiet,
 }
 
-pub fn write_brief(dir: &Path, detail: &ProjectDetail) -> Result<(), String> {
+pub fn write_brief(dir: &Path, detail: &ProjectDetail, art_guide: Option<&str>) -> Result<(), String> {
     if dir.exists() {
         std::fs::remove_dir_all(dir)
             .map_err(|error| format!("Не вдалося очистити {}: {error}", dir.display()))?;
@@ -85,6 +90,9 @@ pub fn write_brief(dir: &Path, detail: &ProjectDetail) -> Result<(), String> {
             .join(format!("{:02}-{}.html", index + 1, recipes::slugify(&screen.title)));
         recipes::write_file(&file, html.as_bytes())?;
     }
+    if let Some(guide) = art_guide {
+        recipes::write_file(&dir.join(ART_GUIDE), guide.as_bytes())?;
+    }
     Ok(())
 }
 
@@ -129,6 +137,7 @@ pub fn system_prompt(assignment: &Assignment<'_>) -> String {
 - Матеріали студії лежать у {}: design.md (бриф, стиль, екрани), skills/ (дизайн-документ, лор, специфікації й скрипти від навичок студії), \
 screens/ (затверджені макети інтерфейсу 1280×720 у HTML), references.md (референси). Прочитай їх перед роботою.\n\
 - Інтерфейс гри повторює макети зі screens/: палітра, шрифти, розкладка й тексти.\n\
+{}\n\
 - Гра повна й прохідна: головне меню, основний цикл з дизайн-документа, перемога й поразка, пауза, налаштування гучності.\n\
 - Керування: клавіатура й миша, геймпад і сенсорне керування на телефоні.\n\
 - Гра працює офлайн: жодних мережевих запитів, CDN чи зовнішніх ассетів під час гри.\n\
@@ -140,7 +149,40 @@ screens/ (затверджені макети інтерфейсу 1280×720 у 
         engine.stack(),
         engine_contract(engine, assignment.tools),
         assignment.brief.display(),
+        art_rules(assignment),
         verification(engine, assignment.tools),
+    )
+}
+
+fn art_rules(assignment: &Assignment<'_>) -> String {
+    let guide = if assignment.art_guide {
+        format!(" Повні правила арту — у {ART_GUIDE} поруч із design.md.")
+    } else {
+        String::new()
+    };
+    let source = match assignment.art_api {
+        Some(base) => format!(
+            "- Арт генеруй через ComfyUI API Noctics {base}, поки йде робота над кодом: \
+POST {base}/tasks з Content-Type: application/json і тілом {{\"kind\": \"sprite\", \"brief\": \"що це, до 600 символів\", \
+\"prompt\": \"повний промпт англійською\", \"negative\": \"flat vector, clip art, simple shapes\", \"project_id\": {}}}. \
+kind — concept, sprite, texture, effect, interface, model, music або sound. Задача йде на всі увімкнені моделі: \
+стеж GET {base}/tasks/<id>, доки status не стане done або failed, обери найкращий файл серед runs[].files[].url, \
+завантаж його в ассети гри й переглянь через Read. Для серії персонажів тримай ту саму основу промпту.\n\
+- Кожен ассет будуй на референсах його теми з references.md: VFX і світло → effect, панелі, кнопки, іконки й HUD → interface, \
+персонажі, предмети й анімація → sprite або concept, матеріали → texture, звуки → sound, музика → music. \
+Звуки й музику гри теж генеруй тут, за тегами звучання з референсів. Якщо не передати prompt, AI-ядро Noctics складе його саме з референсів проєкту.",
+            assignment.project_id
+        ),
+        None => format!(
+            "- ComfyUI зараз недоступний, тож арт згенерувати не вийде. Для кожного потрібного файлу запиши шлях і промпт англійською в {ART_PROMPTS}, \
+а в грі на його місці постав тонку рамку-слот з назвою файлу — це єдиний дозволений виняток із правила про заглушки. Малюнок з фігур замість арту — ніколи."
+        ),
+    };
+    format!(
+        "- Персонажі, істоти, предмети, локації й ілюстрації — лише справжній арт у PNG або GLB, ніколи не фігури з коду, SVG, \
+_draw, Polygon2D, CSG, PIL чи примітивів. Кодом і примітивами — лише рамки інтерфейсу, ефекти, геометрія рівня й колізії.{guide}\n\
+- У макетах screens/ стоять слоти <figure class=\"art-slot\" data-art=\"шлях\" data-prompt=\"промпт\">: \
+кожен такий арт має лягти в гру за шляхом data-art, згенерований з промпту data-prompt.\n{source}"
     )
 }
 
@@ -171,7 +213,7 @@ fn engine_contract(engine: GameEngine, tools: &Toolchains) -> String {
             format!(
                 "Godot {version} з GDScript. У корені — project.godot з config/name і run/main_scene. \
 Сцени (.tscn) і ресурси пиши в текстовому форматі Godot 4. Не створюй export_presets.cfg і папку .godot — пресети експорту студія додає сама. \
-Графіку будуй кодом (_draw, Polygon2D, CSG і MeshInstance3D з примітивів, шейдери) або пиши SVG-файли."
+Арт — PNG і GLB у assets/; кодом (_draw, шейдери, CSG) будуй лише інтерфейс, ефекти й геометрію рівня."
             )
         }
         GameEngine::Unity => {
@@ -183,7 +225,8 @@ fn engine_contract(engine: GameEngine, tools: &Toolchains) -> String {
                 "Unity {version} з C#. Обов’язково: ProjectSettings/ProjectVersion.txt (m_EditorVersion: {version}), \
 Packages/manifest.json з потрібними пакетами (com.unity.ugui тощо), скрипти в Assets/Scripts. \
 Сцен вручну не пиши: студія сама створить Assets/Scenes/Main.unity з камерою і світлом, а гра має запускатися кодом через \
-[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)] — рівні, меші з примітивів, матеріали й UI (UGUI) теж кодом. \
+[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)] — рівні, матеріали й UI (UGUI) теж кодом; примітиви — лише для геометрії рівня, \
+а арт — PNG у Assets/Resources/Art, завантажений через Resources.Load. \
 Не створюй Assets/Editor/NocticsBuild.cs — це скрипт збірки студії."
             )
         }
@@ -196,12 +239,13 @@ Packages/manifest.json з потрібними пакетами (com.unity.ugui 
                 "Unreal Engine {version} з C++. У корені — <Назва>.uproject (EngineAssociation \"{version}\", один Runtime-модуль), \
 Source/<Модуль>/ з <Модуль>.Build.cs, Source/<Модуль>.Target.cs і Source/<Модуль>Editor.Target.cs, Config/DefaultEngine.ini та Config/DefaultGame.ini. \
 Назви проєкту й модуля — латиницею без пробілів. Мапи (.umap) бінарні, тож не створюй їх: GameDefaultMap=/Engine/Maps/Entry, \
-а GlobalDefaultGameMode — твій C++ GameMode, який будує рівень кодом (актори, меші з /Engine/BasicShapes, світло, камера, UI на UMG або Slate з C++)."
+а GlobalDefaultGameMode — твій C++ GameMode, який будує рівень кодом (актори, світло, камера, UI на UMG або Slate з C++). \
+/Engine/BasicShapes — лише для геометрії рівня; арт — PNG у Content/Art, доданий у DirectoriesToAlwaysStageAsNonUFS і завантажений через FImageUtils::ImportFileAsTexture2D."
             )
         }
         GameEngine::ThreeJs | GameEngine::BabylonJs | GameEngine::Phaser => format!(
             "{} на Vite + TypeScript. package.json зі скриптами \"dev\" і \"build\": \"vite build\", vite.config.ts з base: './', \
-точка входу index.html у корені. Ассети — локально (public/ або згенеровані кодом), без CDN. \
+точка входу index.html у корені. Ассети — локально в public/, без CDN. \
 Полотно на весь екран з адаптацією під будь-яке співвідношення сторін: гру запускатимуть у браузері, у десктоп-оболонці й на телефоні.",
             engine.label()
         ),
@@ -212,7 +256,7 @@ Source/<Модуль>/ з <Модуль>.Build.cs, Source/<Модуль>.Target.
             engine.label()
         ),
         GameEngine::Defold => "Defold з Lua. У корені — game.project з [bootstrap] main_collection = /main/main.collectionc \
-і input/game.input_binding з усіма діями гри; колекції, game object-и, gui і скрипти — у текстовому форматі Defold. Графіку роби з gui-нод або спрайтів з PNG, які згенеруєш скриптом. \
+і input/game.input_binding з усіма діями гри; колекції, game object-и, gui і скрипти — у текстовому форматі Defold. Арт — спрайти з PNG в atlas-ах у assets/; gui-ноди — лише для інтерфейсу. \
 Не додавай bob.jar у проєкт."
             .to_owned(),
     }
@@ -414,7 +458,11 @@ mod tests {
                 },
             ],
         };
-        write_brief(&dir, &detail).unwrap();
+        write_brief(&dir, &detail, Some("# Справжній арт\n")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(ART_GUIDE)).unwrap(),
+            "# Справжній арт\n"
+        );
         let design = std::fs::read_to_string(dir.join("design.md")).unwrap();
         assert!(design.starts_with("# Нічний злодій"));
         assert!(design.contains("- Головне меню — Старт"));
@@ -439,11 +487,33 @@ mod tests {
             tools: &tools,
             request: None,
             fresh: true,
+            project_id: 7,
+            art_api: Some("http://127.0.0.1:47822"),
+            art_guide: true,
         };
         let system = system_prompt(&assignment);
         assert!(system.contains("Рушій: Phaser (JavaScript · 2D)."));
         assert!(system.contains("base: './'"));
         assert!(system.contains("Жодних коментарів у коді"));
+        assert!(system.contains("POST http://127.0.0.1:47822/tasks"));
+        assert!(system.contains("\"project_id\": 7"));
+        assert!(system.contains("data-art"));
+        assert!(system.contains(ART_GUIDE));
+        assert!(system.contains("звуки → sound, музика → music"));
+        let offline = system_prompt(&Assignment {
+            art_api: None,
+            art_guide: false,
+            ..assignment
+        });
+        assert!(offline.contains(ART_PROMPTS));
+        assert!(!offline.contains("/tasks"));
+        assert!(!offline.contains(ART_GUIDE));
+        for engine in GameEngine::ALL {
+            let contract = engine_contract(engine, &tools);
+            assert!(!contract.contains("Графіку будуй кодом"));
+            assert!(!contract.contains("згенеровані кодом"));
+            assert!(!contract.contains("згенеруєш скриптом"));
+        }
         assert!(task_message(&assignment).starts_with("Створи гру «Нічний злодій» з нуля"));
         let fix = Assignment {
             request: Some("Збірка під Web впала"),

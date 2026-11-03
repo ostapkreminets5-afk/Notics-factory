@@ -18,10 +18,12 @@ pub const MAX_CORNER_RADIUS: u8 = 32;
 pub const SCREEN_WIDTH: u32 = 1280;
 pub const SCREEN_HEIGHT: u32 = 720;
 pub const INTERFACE_SKILL: &str = "game-ui-screens";
+pub const ART_SKILL: &str = "real-art-not-vector";
+pub const SCREEN_SKILLS: [&str; 2] = [INTERFACE_SKILL, ART_SKILL];
 pub const DESIGN_STAGE: u8 = 1;
 pub const INTERFACE_STAGE: u8 = 2;
 pub const MIN_REFERENCES: usize = 8;
-pub const MAX_REFERENCES: usize = 14;
+pub const MAX_REFERENCES: usize = 18;
 pub const REFERENCE_PALETTE_SIZE: usize = 3;
 pub const MAX_ANALYSIS_KEYWORDS: usize = 10;
 
@@ -241,10 +243,13 @@ pub enum ReferenceTopic {
     Icons,
     Materials,
     Props,
+    Animation,
+    Sounds,
+    Music,
 }
 
 impl ReferenceTopic {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::World,
         Self::Characters,
         Self::Light,
@@ -255,6 +260,9 @@ impl ReferenceTopic {
         Self::Icons,
         Self::Materials,
         Self::Props,
+        Self::Animation,
+        Self::Sounds,
+        Self::Music,
     ];
 
     pub fn code(self) -> &'static str {
@@ -269,6 +277,9 @@ impl ReferenceTopic {
             Self::Icons => "icons",
             Self::Materials => "materials",
             Self::Props => "props",
+            Self::Animation => "animation",
+            Self::Sounds => "sounds",
+            Self::Music => "music",
         }
     }
 
@@ -288,7 +299,14 @@ impl ReferenceTopic {
             Self::Icons => "Іконки",
             Self::Materials => "Матеріали",
             Self::Props => "Предмети",
+            Self::Animation => "Анімація",
+            Self::Sounds => "Звуки й SFX",
+            Self::Music => "Музика",
         }
+    }
+
+    pub fn is_audio(self) -> bool {
+        matches!(self, Self::Sounds | Self::Music)
     }
 }
 
@@ -384,7 +402,7 @@ pub struct ProjectDetail {
 }
 
 pub fn runs_as_deliverable(skill_name: &str) -> bool {
-    skill_name != INTERFACE_SKILL
+    !SCREEN_SKILLS.contains(&skill_name)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -544,11 +562,17 @@ mod tests {
             assert_eq!(OutputStatus::from_code(status.code()), Some(status));
         }
         assert!(!runs_as_deliverable(INTERFACE_SKILL));
+        assert!(!runs_as_deliverable(ART_SKILL));
         assert!(runs_as_deliverable("game-scripts"));
         assert_eq!(ScreenStatus::from_code("unknown"), None);
         for topic in ReferenceTopic::ALL {
             assert_eq!(ReferenceTopic::from_code(topic.code()), Some(topic));
         }
+        let audio: Vec<ReferenceTopic> = ReferenceTopic::ALL
+            .into_iter()
+            .filter(|topic| topic.is_audio())
+            .collect();
+        assert_eq!(audio, [ReferenceTopic::Sounds, ReferenceTopic::Music]);
         for engine in GameEngine::ALL {
             assert_eq!(GameEngine::from_code(engine.code()), Some(engine));
             let wire = serde_json::to_string(&engine).unwrap();

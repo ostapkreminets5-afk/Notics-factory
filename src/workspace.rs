@@ -1,18 +1,20 @@
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
-use noctics_shared::{GameEngine, MAX_PROMPT_CHARS, Session, StudioError, ToolSlot};
+use noctics_shared::{BuildTarget, GameEngine, MAX_PROMPT_CHARS, Session, StudioError, ToolSlot};
 
 use crate::bridge;
 use crate::build::BuildPage;
 use crate::comfy::{Comfy, ComfyPage, provide_comfy, use_comfy};
 use crate::design::ClaudeDesignPage;
 use crate::engine_switcher::EngineSwitcher;
+use crate::factory_mode::{FactoryMode, ModeSwitch, provide_factory_mode};
 use crate::home::CorePage;
 use crate::journal::JournalPage;
 use crate::icons::{
     ArrowRightIcon, BoxIcon, ChevronsIcon, CpuIcon, FolderIcon, GridIcon, ListIcon, LogoMark,
     PackageIcon, PanelsIcon, RouteIcon, SettingsIcon, SidebarIcon, StarIcon,
 };
+use crate::node_factory::NodeFactory;
 use crate::pipeline::PipelineCanvas;
 use crate::project_switcher::ProjectSwitcher;
 use crate::projects::ProjectsPage;
@@ -123,6 +125,12 @@ pub fn Workspace(session: Session, on_sign_out: EventHandler<()>) -> Element {
     let tools = provide_tools();
     provide_comfy();
     let layout = provide_sidebar_layout();
+    let mode = provide_factory_mode();
+    if mode.get() == FactoryMode::Nodes {
+        return rsx! {
+            NodeFactory {}
+        };
+    }
     let section = (studio.section)();
 
     let view = match section {
@@ -240,6 +248,7 @@ fn Sidebar() -> Element {
                 span { class: "wordmark", "NOCTICS" }
                 span { class: "brand-sub", "factory" }
             }
+            ModeSwitch {}
             ProjectSwitcher {}
             EngineSwitcher {}
             button {
@@ -262,7 +271,7 @@ fn Sidebar() -> Element {
                         button {
                             class: nav_item_class(entry.section == current, dragging() && held() == Some(index)),
                             r#type: "button",
-                            title: collapsed.then(|| format!("{} · {}", nav_title(entry, tools), entry.note)),
+                            title: collapsed.then(|| format!("{} · {}", nav_title(entry, tools), nav_note(entry, studio))),
                             aria_current: if entry.section == current { "page" } else { "false" },
                             onpointerdown: move |event| {
                                 suppress_click.set(false);
@@ -284,7 +293,7 @@ fn Sidebar() -> Element {
                             NavIcon { section: entry.section }
                             span { class: "nav-text",
                                 span { class: "nav-title", "{nav_title(entry, tools)}" }
-                                span { class: "nav-note", "{entry.note}" }
+                                span { class: "nav-note", "{nav_note(entry, studio)}" }
                             }
                             {
                                 match badge_for(entry, studio, comfy, tools) {
@@ -368,6 +377,16 @@ fn nav_title(entry: &SystemEntry, tools: Tools) -> String {
     slot_for(entry.section)
         .and_then(|slot| tools.active(slot))
         .map_or_else(|| entry.title.to_owned(), |tool| tool.name)
+}
+
+fn nav_note(entry: &SystemEntry, studio: Studio) -> String {
+    if entry.section != Section::Build {
+        return entry.note.to_owned();
+    }
+    let engine = studio
+        .focused_project()
+        .map_or_else(|| (studio.draft_engine)(), |project| project.engine);
+    format!("{} · {}", entry.note, engine.label())
 }
 
 fn nav_item_class(active: bool, dragged: bool) -> &'static str {
@@ -479,7 +498,8 @@ fn PipelineView() -> Element {
         pending.set(true);
         error.set(None);
         spawn(async move {
-            match bridge::start_project(&prompt(), (studio.draft_engine)()).await {
+            let targets = studio.build_plan.read().clone();
+            match bridge::start_project(&prompt(), (studio.draft_engine)(), &targets).await {
                 Ok(project) => {
                     prompt.set(String::new());
                     studio.changed();
@@ -495,6 +515,16 @@ fn PipelineView() -> Element {
 
     let length = prompt.read().chars().count();
     let engine = (studio.draft_engine)();
+    let planned: Vec<&str> = BuildTarget::ALL
+        .into_iter()
+        .filter(|target| studio.plans_build(*target))
+        .map(BuildTarget::label)
+        .collect();
+    let plan_summary = if planned.is_empty() {
+        "не обрано".to_owned()
+    } else {
+        planned.join(", ")
+    };
 
     rsx! {
         section { class: "pipeline-view",
@@ -543,6 +573,22 @@ fn PipelineView() -> Element {
                                 title: "{choice.label()} · {choice.stack()}",
                                 onclick: move |_| studio.choose_draft_engine(choice),
                                 "{choice.label()}"
+                            }
+                        }
+                    }
+                }
+                div { class: "engine-field",
+                    span { class: "mono-label", "Білд під · {plan_summary}" }
+                    div { class: "chip-row engine-chips", role: "group", aria_label: "Платформи білду",
+                        for target in BuildTarget::ALL {
+                            button {
+                                key: "{target.code()}",
+                                class: if studio.plans_build(target) { "chip is-active" } else { "chip" },
+                                r#type: "button",
+                                aria_pressed: if studio.plans_build(target) { "true" } else { "false" },
+                                title: "{target.label()} · {target.package()}",
+                                onclick: move |_| studio.toggle_build_target(target),
+                                "{target.label()}"
                             }
                         }
                     }

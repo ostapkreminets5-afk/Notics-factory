@@ -35,7 +35,12 @@ const SCHEMA: &str = "
         finished_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS builds_by_project ON builds (project_id, id);
+    CREATE TABLE IF NOT EXISTS build_plans (
+        project_id INTEGER PRIMARY KEY,
+        targets TEXT NOT NULL
+    );
 ";
+const PLAN_SEPARATOR: char = ',';
 const REQUEUE_INTERRUPTED: &str =
     "UPDATE builds SET status = 'queued', started_at = NULL WHERE status = 'running'";
 const INTERRUPTED_GENERATION: &str =
@@ -86,6 +91,39 @@ impl BuildStore {
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub fn set_plan(&self, project_id: i64, targets: &[BuildTarget]) -> Result<(), BuildError> {
+        let codes: Vec<&str> = BuildTarget::ALL
+            .into_iter()
+            .filter(|target| targets.contains(target))
+            .map(BuildTarget::code)
+            .collect();
+        self.lock()?
+            .execute(
+                "INSERT INTO build_plans (project_id, targets) VALUES (?1, ?2)
+                 ON CONFLICT(project_id) DO UPDATE SET targets = excluded.targets",
+                params![project_id, codes.join(&PLAN_SEPARATOR.to_string())],
+            )
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    pub fn plan(&self, project_id: i64) -> Result<Vec<BuildTarget>, BuildError> {
+        let stored: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT targets FROM build_plans WHERE project_id = ?1",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(stored
+            .unwrap_or_default()
+            .split(PLAN_SEPARATOR)
+            .filter_map(BuildTarget::from_code)
+            .collect())
     }
 
     pub fn source(&self, project_id: i64) -> Result<Option<StoredSource>, BuildError> {
@@ -398,6 +436,19 @@ mod tests {
 
     fn in_memory() -> BuildStore {
         BuildStore::prepare(Connection::open_in_memory().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn remembers_the_build_plan_of_each_project() {
+        let store = in_memory();
+        assert!(store.plan(3).unwrap().is_empty());
+        store
+            .set_plan(3, &[BuildTarget::Web, BuildTarget::Windows, BuildTarget::Web])
+            .unwrap();
+        assert_eq!(store.plan(3).unwrap(), [BuildTarget::Windows, BuildTarget::Web]);
+        store.set_plan(3, &[]).unwrap();
+        assert!(store.plan(3).unwrap().is_empty());
+        assert!(store.plan(4).unwrap().is_empty());
     }
 
     #[test]

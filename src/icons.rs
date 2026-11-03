@@ -310,3 +310,28 @@ pub fn CloseGlyph() -> Element {
         WindowGlyph { path { d: "M.5.5l9 9M9.5.5l-9 9" } }
     }
 }
+
+#[component]
+pub fn NodesIcon() -> Element {
+    rsx! {
+        Glyph {
+            rect { x: "2", y: "3", width: "7", height: "6", rx: "1.5" }
+            rect { x: "15", y: "15", width: "7", height: "6", rx: "1.5" }
+            rect { x: "15", y: "3", width: "7", height: "6", rx: "1.5" }
+            path { d: "M9 6h6" }
+            path { d: "M9 6h1.5a2 2 0 0 1 2 2v8a2 2 0 0 0 2 2H15" }
+        }
+    }
+}
+
+#[component]
+pub fn LayoutIcon() -> Element {
+    rsx! {
+        Glyph {
+            rect { x: "3", y: "3", width: "18", height: "18", rx: "2" }
+            path { d: "M9 3v18" }
+            path { d: "M13 8h4" }
+            path { d: "M13 12h4" }
+        }
+    }
+}

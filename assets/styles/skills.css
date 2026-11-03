@@ -36,6 +36,83 @@
   color: var(--text);
 }
 
+.filter-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  margin-top: 22px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px 0 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s,
+    color 0.15s;
+}
+
+.filter-tab:hover {
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text);
+}
+
+.filter-tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.filter-tab.is-active {
+  border-color: var(--line-strong);
+  background: #161a26;
+  color: var(--text);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.filter-tab-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  transition:
+    background-color 0.15s,
+    color 0.15s;
+}
+
+.filter-tab:hover .filter-tab-count {
+  color: var(--text-muted);
+}
+
+.filter-tab.is-active .filter-tab-count {
+  background: rgba(59, 123, 255, 0.16);
+  color: #9fbcff;
+}
+
 .skill-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));

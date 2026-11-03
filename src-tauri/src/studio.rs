@@ -4,11 +4,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use noctics_shared::{
-    ClaudeAccount, DESIGN_STAGE, GameEngine, INTERFACE_SKILL, Project, Skill, StudioError,
-    runs_as_deliverable,
+    ART_SKILL, ClaudeAccount, DESIGN_STAGE, GameEngine, Project, SCREEN_SKILLS, Skill, SkillCategory,
+    StudioError, runs_as_deliverable,
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::builder::Builder;
 use crate::claude_code::{ClaudeCode, Completion, Effort};
 use crate::pinterest::{Pinterest, Refresh};
 use crate::prompts::{self, ReferenceBrief, ScreenBrief};
@@ -152,6 +153,7 @@ impl Studio {
                         Err(problem) => self.store.fail_output(output.output_id, &problem),
                     };
                     self.notify();
+                    self.advance(output.project_id);
                     self.kick();
                 }
                 Job::Screen(screen) => {
@@ -161,8 +163,19 @@ impl Studio {
                         Err(problem) => self.store.fail_screen(screen.screen_id, &problem),
                     };
                     self.notify();
+                    self.advance(screen.project_id);
                 }
             }
+        }
+    }
+
+    fn advance(&self, project_id: i64) {
+        if !self.store.ready_for_code(project_id).unwrap_or(false) {
+            return;
+        }
+        if let Some(builder) = self.app.try_state::<Arc<Builder>>() {
+            let builder = Arc::clone(&builder);
+            std::thread::spawn(move || builder.advance(project_id));
         }
     }
 
@@ -218,6 +231,7 @@ impl Studio {
             sibling_titles: &job.sibling_titles,
             title: &job.title,
             summary: &job.summary,
+            board: &job.board,
             reference: job
                 .reference
                 .as_ref()
@@ -235,7 +249,7 @@ impl Studio {
         let interface: Vec<Skill> = self
             .enabled_skills()?
             .into_iter()
-            .filter(|skill| skill.name == INTERFACE_SKILL)
+            .filter(|skill| SCREEN_SKILLS.contains(&skill.name.as_str()))
             .collect();
         let answer = self
             .ask(Completion {
@@ -257,19 +271,27 @@ impl Studio {
     }
 
     async fn deliver(&self, job: &OutputJob) -> Result<String, StudioError> {
-        let skill = self
-            .enabled_skills()?
-            .into_iter()
+        let enabled = self.enabled_skills()?;
+        let skill = enabled
+            .iter()
             .find(|skill| skill.name == job.skill_name)
+            .cloned()
             .ok_or(StudioError::SkillUnavailable)?;
         let effort = if skill.stage <= DESIGN_STAGE {
             Effort::High
         } else {
             Effort::Medium
         };
+        let guides: Vec<Skill> = std::iter::once(skill.clone())
+            .chain(
+                enabled
+                    .into_iter()
+                    .filter(|art| art.name == ART_SKILL && makes_pictures(&skill)),
+            )
+            .collect();
         let answer = self
             .ask(Completion {
-                system: prompts::system_prompt(std::slice::from_ref(&skill)),
+                system: prompts::system_prompt(&guides),
                 user: prompts::deliverable_message(job),
                 effort,
                 schema: None,
@@ -291,6 +313,13 @@ impl Studio {
             .collect())
     }
 
+    pub fn enabled_skill(&self, name: &str) -> Option<Skill> {
+        self.enabled_skills()
+            .ok()?
+            .into_iter()
+            .find(|skill| skill.name == name)
+    }
+
     fn enabled_skills(&self) -> Result<Vec<Skill>, StudioError> {
         Ok(self
             .skills
@@ -299,5 +328,35 @@ impl Studio {
             .into_iter()
             .filter(|skill| skill.enabled)
             .collect())
+    }
+}
+
+fn makes_pictures(skill: &Skill) -> bool {
+    skill.name != ART_SKILL && skill.category != SkillCategory::GameDesign
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skill(name: &str, category: SkillCategory) -> Skill {
+        Skill {
+            id: 0,
+            name: name.into(),
+            stage: 2,
+            title: String::new(),
+            summary: String::new(),
+            category,
+            instructions: String::new(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn art_rules_follow_skills_that_make_pictures_or_code() {
+        assert!(makes_pictures(&skill("game-scripts", SkillCategory::Code)));
+        assert!(makes_pictures(&skill("concept-prompts", SkillCategory::Art)));
+        assert!(!makes_pictures(&skill("lore-and-naming", SkillCategory::GameDesign)));
+        assert!(!makes_pictures(&skill(ART_SKILL, SkillCategory::Art)));
     }
 }

@@ -220,6 +220,14 @@ impl Forge {
         self.public_view().1
     }
 
+    pub fn art_api(&self) -> Option<String> {
+        let (status, models) = self.public_view();
+        let drawable = models
+            .iter()
+            .any(|model| model.medium == Medium::Image && model.usable());
+        (status.online && drawable && !status.media_base.is_empty()).then_some(status.media_base)
+    }
+
     pub fn create(
         self: &Arc<Self>,
         draft: &AssetDraft,
@@ -394,6 +402,7 @@ impl Forge {
             name: &context.game_name,
             pitch: &context.pitch,
             style: &context.style,
+            references: &context.references,
         });
         let completion = Completion {
             system: comfy_prompts::system_prompt(),
@@ -661,6 +670,7 @@ fn models_of(roster: &[Candidate], disabled: &HashSet<String>) -> Vec<ComfyModel
             id: candidate.id.clone(),
             name: candidate.name.clone(),
             note: candidate.note.clone(),
+            precision: candidate.precision.clone(),
             medium: candidate.medium,
             ready: candidate.ready(),
             missing: candidate.missing.clone(),
@@ -776,6 +786,7 @@ mod tests {
             id: id.into(),
             name: id.to_uppercase(),
             note: String::new(),
+            precision: None,
             medium,
             rank: 0,
             recipe: ready.then(|| comfy_recipes::Recipe::Checkpoint {

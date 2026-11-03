@@ -10,7 +10,9 @@ use noctics_shared::{
 
 use crate::bridge;
 use crate::comfy_bridge;
-use crate::icons::{ArrowRightIcon, CloseIcon, ExternalIcon, FolderIcon, RefreshIcon, TrashIcon};
+use crate::icons::{
+    ArrowRightIcon, CheckIcon, CloseIcon, ExternalIcon, FolderIcon, RefreshIcon, TrashIcon,
+};
 use crate::studio::use_studio;
 
 const COMFY_TOOL: &str = "comfyui";
@@ -481,7 +483,7 @@ pub fn ModelRoster(compact: bool) -> Element {
             div { class: "model-roster", p { class: "roster-empty", "Шукаємо моделі ComfyUI…" } }
         };
     };
-    let ready = overview.models.iter().filter(|model| model.ready).count();
+    let enabled = overview.models.iter().filter(|model| model.usable()).count();
     let source = match overview.status.source {
         RosterSource::Server => "наживо з ComfyUI",
         RosterSource::Disk => "з диска · ComfyUI вимкнено",
@@ -503,8 +505,13 @@ pub fn ModelRoster(compact: bool) -> Element {
     rsx! {
         div { class: if compact { "model-roster is-compact" } else { "model-roster" },
             div { class: "roster-head",
-                p { class: "mono-label", "Моделі ComfyUI · {ready}/{overview.models.len()}" }
-                span { class: if overview.status.online { "roster-source is-live" } else { "roster-source" }, "{source}" }
+                if !compact {
+                    p { class: "mono-label", "Моделі ComfyUI · {enabled}/{overview.models.len()}" }
+                }
+                span { class: if overview.status.online { "roster-source is-live" } else { "roster-source" },
+                    span { class: "roster-source-dot" }
+                    "{source}"
+                }
             }
             if overview.models.is_empty() {
                 p { class: "roster-empty",
@@ -519,45 +526,20 @@ pub fn ModelRoster(compact: bool) -> Element {
                         .filter(|model| model.medium == medium)
                         .cloned()
                         .collect();
+                    let on = group.iter().filter(|model| model.usable()).count();
                     rsx! {
                         if !group.is_empty() {
                             div { key: "{medium.label()}", class: "roster-group",
-                                p { class: "roster-group-label", "{medium.label()}" }
+                                div { class: "roster-group-head",
+                                    span { class: "roster-group-label", "{medium.label()}" }
+                                    span { class: "roster-group-count", "{on}/{group.len()}" }
+                                }
                                 for model in group {
-                                    {
-                                        let flipped = model.clone();
-                                        let row_class = match (model.ready, model.enabled) {
-                                            (false, _) => "model-row is-missing",
-                                            (true, false) => "model-row is-off",
-                                            (true, true) => "model-row",
-                                        };
-                                        let detail = if model.ready {
-                                            model.note.clone()
-                                        } else {
-                                            format!("Бракує: {}", model.missing.join(", "))
-                                        };
-                                        rsx! {
-                                            div { key: "{model.id}", class: row_class, title: "{detail}",
-                                                span { class: "model-text",
-                                                    span { class: "model-name", "{model.name}" }
-                                                    span { class: "model-note", "{detail}" }
-                                                }
-                                                if model.ready {
-                                                    button {
-                                                        class: if model.enabled { "model-switch is-on" } else { "model-switch" },
-                                                        r#type: "button",
-                                                        role: "switch",
-                                                        aria_checked: if model.enabled { "true" } else { "false" },
-                                                        aria_label: "{model.name} у порівнянні",
-                                                        title: if model.enabled { "Бере участь у порівнянні — натисни, щоб вимкнути" } else { "Вимкнено — натисни, щоб увімкнути" },
-                                                        onclick: move |_| toggle(flipped.clone()),
-                                                        span { class: "model-switch-knob" }
-                                                    }
-                                                } else {
-                                                    span { class: "model-missing-tag", "Неповна" }
-                                                }
-                                            }
-                                        }
+                                    ModelRow {
+                                        key: "{model.id}",
+                                        model: model.clone(),
+                                        compact,
+                                        on_toggle: move |picked| toggle(picked),
                                     }
                                 }
                             }
@@ -565,8 +547,61 @@ pub fn ModelRoster(compact: bool) -> Element {
                     }
                 }
             }
+            if !compact && !overview.models.is_empty() {
+                p { class: "roster-hint", "Натисни на модель, щоб прибрати її з порівняння або повернути." }
+            }
             if let Some(message) = error() {
                 p { class: "tool-error", role: "alert", "{message}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn ModelRow(model: ComfyModel, compact: bool, on_toggle: EventHandler<ComfyModel>) -> Element {
+    let flipped = model.clone();
+    let state = match (model.ready, model.enabled) {
+        (false, _) => "is-missing",
+        (true, false) => "is-off",
+        (true, true) => "is-on",
+    };
+    let missing = format!("Бракує: {}", model.missing.join(", "));
+    let hint = match (model.ready, model.enabled) {
+        (false, _) => missing.clone(),
+        (true, true) => format!("{} · {} — бере участь у порівнянні. Натисни, щоб вимкнути.", model.name, model.note),
+        (true, false) => format!("{} · {} — вимкнено. Натисни, щоб увімкнути.", model.name, model.note),
+    };
+    let detail = if model.ready {
+        (!compact).then(|| model.note.clone())
+    } else {
+        Some(missing)
+    };
+    rsx! {
+        button {
+            class: "model-row {state}",
+            r#type: "button",
+            role: "switch",
+            aria_checked: if model.usable() { "true" } else { "false" },
+            disabled: !model.ready,
+            title: "{hint}",
+            onclick: move |_| on_toggle.call(flipped.clone()),
+            span { class: "model-check",
+                if model.usable() {
+                    CheckIcon {}
+                } else if !model.ready {
+                    "!"
+                }
+            }
+            span { class: "model-text",
+                span { class: "model-name", "{model.name}" }
+                if let Some(detail) = detail {
+                    span { class: "model-note", "{detail}" }
+                }
+            }
+            if !model.ready {
+                span { class: "model-tag is-warning", "неповна" }
+            } else if let Some(precision) = &model.precision {
+                span { class: "model-tag", "{precision}" }
             }
         }
     }

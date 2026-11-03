@@ -87,6 +87,7 @@ pub enum JournalEvent {
     BuildDone { target: BuildTarget, size_bytes: u64 },
     BuildFailed { target: BuildTarget, reason: String },
     BuildCancelled { target: BuildTarget },
+    BuildSkipped { target: BuildTarget, reason: String },
 }
 
 impl JournalEvent {
@@ -105,7 +106,8 @@ impl JournalEvent {
             | Self::BuildStarted { .. }
             | Self::BuildDone { .. }
             | Self::BuildFailed { .. }
-            | Self::BuildCancelled { .. } => JournalSource::Core,
+            | Self::BuildCancelled { .. }
+            | Self::BuildSkipped { .. } => JournalSource::Core,
             Self::SkillsSynced { .. }
             | Self::SkillStarted { .. }
             | Self::SkillDone { .. }
@@ -154,7 +156,8 @@ impl JournalEvent {
             | Self::ProjectRenamed { .. }
             | Self::EngineChanged { .. }
             | Self::RetryQueued { .. }
-            | Self::BuildCancelled { .. } => JournalTone::Info,
+            | Self::BuildCancelled { .. }
+            | Self::BuildSkipped { .. } => JournalTone::Info,
         }
     }
 
@@ -183,7 +186,8 @@ impl JournalEvent {
             | Self::BuildStarted { .. }
             | Self::BuildDone { .. }
             | Self::BuildFailed { .. }
-            | Self::BuildCancelled { .. } => Some(LAST_STAGE),
+            | Self::BuildCancelled { .. }
+            | Self::BuildSkipped { .. } => Some(LAST_STAGE),
             Self::SkillsSynced { .. }
             | Self::ProjectFormed { .. }
             | Self::ProjectRenamed { .. }

@@ -175,7 +175,7 @@ impl Pinterest {
         let targets: Vec<(usize, String)> = board
             .into_iter()
             .enumerate()
-            .filter(|(_, reference)| refresh.wants(reference))
+            .filter(|(_, reference)| !reference.topic.is_audio() && refresh.wants(reference))
             .map(|(index, reference)| (index, reference.query))
             .collect();
         if targets.is_empty() || !self.boards().loading.insert(project_id) {

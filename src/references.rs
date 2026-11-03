@@ -15,6 +15,7 @@ const DEFAULT_TOOL_NAME: &str = "Pinterest";
 const PICTURE_WORDS: [&str; 3] = ["картинка", "картинки", "картинок"];
 const SEARCH_WORDS: [&str; 3] = ["пошук", "пошуки", "пошуків"];
 const TOPIC_WORDS: [&str; 3] = ["тема", "теми", "тем"];
+const SOUND_SOURCE: &str = "звучання для ComfyUI";
 
 #[derive(Clone, PartialEq)]
 struct Viewed {
@@ -451,7 +452,7 @@ fn PromptAnalysisPanel(
                 }
                 if analysis.summary.is_empty() {
                     p { class: "analysis-summary is-missing",
-                        "Цю дошку зібрано до появи аналізу. Натисни «Підібрати заново» — Claude розбере промт і складе план пошуку: VFX, панелі, кнопки, іконки, персонажі."
+                        "Цю дошку зібрано до появи аналізу. Натисни «Підібрати заново» — Claude розбере промт і складе план пошуку: VFX, панелі, кнопки, іконки, персонажі, анімацію, звуки й музику."
                     }
                 } else {
                     p { class: "analysis-summary", "{analysis.summary}" }
@@ -490,7 +491,12 @@ fn SearchNeedCard(
     let mut filter = filter;
     let topic = group.topic;
     let active = filter() == Some(topic);
-    let found = plural(amount(group.found), PICTURE_WORDS);
+    let audio = topic.is_audio();
+    let found = if audio {
+        SOUND_SOURCE.to_owned()
+    } else {
+        plural(amount(group.found), PICTURE_WORDS)
+    };
     let pick_title = if active {
         "Показати всі картинки".to_owned()
     } else {
@@ -521,13 +527,21 @@ fn SearchNeedCard(
                             rsx! {
                                 li { key: "{index}", class: "search-need-query",
                                     span { class: "search-need-title", "{title}" }
-                                    button {
-                                        class: "reference-query",
-                                        r#type: "button",
-                                        title: "Шукати ще в Pinterest: {query}",
-                                        onclick: move |_| on_search.call(index),
-                                        ExternalIcon {}
-                                        span { "{query}" }
+                                    if audio {
+                                        span {
+                                            class: "reference-sound",
+                                            title: "Теги звучання для генерації в ComfyUI",
+                                            "{query}"
+                                        }
+                                    } else {
+                                        button {
+                                            class: "reference-query",
+                                            r#type: "button",
+                                            title: "Шукати ще в Pinterest: {query}",
+                                            onclick: move |_| on_search.call(index),
+                                            ExternalIcon {}
+                                            span { "{query}" }
+                                        }
                                     }
                                 }
                             }
@@ -742,7 +756,7 @@ fn PinViewer(viewed: Viewed, on_search: EventHandler<()>, on_close: EventHandler
     }
 }
 
-fn explain_pinterest(problem: &PinterestError) -> String {
+pub(crate) fn explain_pinterest(problem: &PinterestError) -> String {
     match problem {
         PinterestError::SignedOut => "Сесія завершилась — увійди знову.".to_owned(),
         PinterestError::NotFound => "Цього проєкту чи піна вже немає.".to_owned(),

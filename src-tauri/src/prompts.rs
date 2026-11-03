@@ -22,6 +22,7 @@ const MAX_REFERENCE_QUERY_CHARS: usize = 80;
 const MAX_ANALYSIS_SUMMARY_CHARS: usize = 420;
 const MAX_KEYWORD_CHARS: usize = 32;
 const MAX_NEED_CHARS: usize = 160;
+const PIN_TITLES_PER_REFERENCE: usize = 3;
 
 pub struct Plan {
     pub name: String,
@@ -59,6 +60,7 @@ pub struct ScreenBrief<'a> {
     pub sibling_titles: &'a [String],
     pub title: &'a str,
     pub summary: &'a str,
+    pub board: &'a [Reference],
     pub reference: Option<(&'a str, &'a str)>,
     pub revision: Option<(&'a str, &'a str)>,
 }
@@ -189,13 +191,15 @@ keywords — 5–{MAX_ANALYSIS_KEYWORDS} коротких візуальних �
 needs — що саме треба знайти для цієї гри, по одному пункту на тему: topic — одне з: {topics}; \
 what — що конкретно шукати й навіщо грі, до 120 символів. \
 Обов’язково продумай VFX і ефекти (удари, магія, частинки, вибухи), панелі й рамки інтерфейсу, кнопки, іконки, \
-персонажів і ворогів — пропусти тему лише тоді, коли в цій грі її справді немає.\n\
-- references: {MIN_REFERENCES}–{MAX_REFERENCES} пошуків для дошки Pinterest за пунктами needs — щонайменше один на кожен пункт. \
+персонажів і ворогів, анімацію, звуки й музику — пропусти тему лише тоді, коли в цій грі її справді немає.\n\
+- references: {MIN_REFERENCES}–{MAX_REFERENCES} референсів за пунктами needs — щонайменше один на кожен пункт. \
 topic — одне з: {topics}; title — що на референсі, 2–6 слів; note — що саме взяти з нього для гри, до 120 символів; \
-query — пошуковий запит для Pinterest англійською, 3–7 слів; для vfx, interface, panels, buttons та icons додавай у запит \
-«game ui», «game vfx» чи «game asset», щоб Pinterest віддав саме ігрові елементи; \
-palette — {REFERENCE_PALETTE_SIZE} кольори #rrggbb, що домінують на таких референсах. \
-У запитах не згадуй чужі ігри, фільми, бренди чи імена художників — описуй те, що видно: форму, світло, фактуру, епоху."
+query — для візуальних тем це пошуковий запит для Pinterest англійською, 3–7 слів; для vfx, interface, panels, buttons, icons та animation додавай у запит \
+«game ui», «game vfx», «game asset» чи «sprite animation», щоб Pinterest віддав саме ігрові елементи; \
+для sounds і music query — це теги звучання англійською для генерації в ComfyUI: жанр, інструменти, темп, настрій, фактура звуку, \
+напр. «dark ambient, low drones, slow 70 bpm» чи «short crunchy sword hit, metallic, dry»; \
+palette — {REFERENCE_PALETTE_SIZE} кольори #rrggbb, що домінують на таких референсах, для sounds і music — порожній масив. \
+У запитах не згадуй чужі ігри, фільми, бренди чи імена художників і композиторів — описуй те, що видно й чути: форму, світло, фактуру, епоху, звучання."
     )
 }
 
@@ -345,18 +349,46 @@ fn clean_references(raw: &[RawReference]) -> Vec<Reference> {
 pub fn describe_references(references: &[Reference]) -> String {
     references
         .iter()
-        .map(|reference| {
-            format!(
-                "- [{}] {} — {} (Pinterest: «{}»; кольори: {})",
-                reference.topic.label(),
-                reference.title,
-                reference.note,
-                reference.query,
-                reference.palette.join(", ")
-            )
-        })
+        .map(describe_reference)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn describe_reference(reference: &Reference) -> String {
+    let topic = reference.topic.label();
+    if reference.topic.is_audio() {
+        return format!(
+            "- [{topic}] {} — {} (звучання: «{}»)",
+            reference.title, reference.note, reference.query
+        );
+    }
+    let pins: Vec<&str> = reference
+        .pins
+        .iter()
+        .map(|pin| pin.title.trim())
+        .filter(|title| !title.is_empty())
+        .take(PIN_TITLES_PER_REFERENCE)
+        .collect();
+    let seen = if pins.is_empty() {
+        String::new()
+    } else {
+        format!("; на пінах: {}", pins.join(" · "))
+    };
+    format!(
+        "- [{topic}] {} — {} (Pinterest: «{}»; кольори: {}{seen})",
+        reference.title,
+        reference.note,
+        reference.query,
+        reference.palette.join(", ")
+    )
+}
+
+pub fn visual_references(references: &[Reference]) -> Vec<Reference> {
+    references
+        .iter()
+        .filter(|reference| !reference.topic.is_audio())
+        .cloned()
+        .collect()
 }
 
 pub fn plan_schema() -> Value {
@@ -470,6 +502,14 @@ pub fn screen_message(brief: &ScreenBrief<'_>) -> String {
         style.mood,
         brief.sibling_titles.join(", "),
     );
+    let board = visual_references(brief.board);
+    if !board.is_empty() {
+        message.push_str(&format!(
+            "Дошка референсів гри з Pinterest — бери з неї форму панелей, рамок і кнопок, іконки, світло, фактуру й кольори; \
+промпти слотів арту в data-prompt пиши в стилі референсів світу й персонажів:\n<references>\n{}\n</references>\n\n",
+            describe_references(&board)
+        ));
+    }
     if let Some((title, html)) = brief.reference {
         message.push_str(&format!(
             "Уже готовий екран цієї гри — тримай ту саму мову оформлення:\n<reference_screen title=\"{title}\">\n{html}\n</reference_screen>\n\n"
@@ -492,7 +532,8 @@ pub fn screen_message(brief: &ScreenBrief<'_>) -> String {
 - Один повний HTML-документ, що починається з <!DOCTYPE html>.\n\
 - Екран рівно {SCREEN_WIDTH}×{SCREEN_HEIGHT} px: html і body без відступів, body має width:{SCREEN_WIDTH}px; height:{SCREEN_HEIGHT}px; overflow:hidden.\n\
 - Увесь CSS усередині <style>. Без JavaScript.\n\
-- Без зовнішніх зображень: фони, ілюстрації та іконки — CSS-градієнти й inline SVG.\n\
+- Без зовнішніх зображень. Іконки інтерфейсу, рамки й роздільники — inline SVG або CSS; атмосферу фону — світло, туман, глибину — CSS-градієнтами.\n\
+- Персонажів, істот, обличчя, предмети, локації та будь-які ілюстрації ніколи не малюй SVG, CSS-фігурами чи іншими примітивами — жодних кіл, еліпсів, трикутників і паличок замість арту. На їхньому місці постав слот арту: <figure class=\"art-slot\" data-art=\"art/<тека>/<назва>.png\" data-prompt=\"<промпт англійською для ComfyUI>\"> потрібного розміру, з тонкою рамкою в стилі екрана й підписом шляху файлу всередині. Слот заповнить арт, згенерований у ComfyUI на етапі збірки.\n\
 - Шрифти — лише через <link> з fonts.googleapis.com.\n\
 - Тексти інтерфейсу — мовою гри, з назвами й числами з дизайн-документа, без lorem ipsum.\n\
 - Поверни лише HTML-документ, без пояснень і без Markdown-огорож."
@@ -560,7 +601,7 @@ fn clip(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use noctics_shared::SkillCategory;
+    use noctics_shared::{Pin, SkillCategory};
 
     use super::*;
 
@@ -581,6 +622,7 @@ mod tests {
     fn deliverable_brief_carries_previous_results_and_the_task() {
         let job = OutputJob {
             output_id: 1,
+            project_id: 1,
             skill_name: "game-scripts".into(),
             title: "Скрипти гри".into(),
             prompt: "Стелс про злодія".into(),
@@ -761,6 +803,28 @@ mod tests {
             mood: "Неон".into(),
         };
         let titles = vec!["Головне меню".to_owned(), "HUD".to_owned()];
+        let board = vec![
+            Reference {
+                topic: ReferenceTopic::Panels,
+                title: "Кам’яні рамки".into(),
+                note: "Фаска і тріщини".into(),
+                query: "stone frame game ui".into(),
+                palette: vec!["#334455".into()],
+                pins: vec![Pin {
+                    id: "1".into(),
+                    image: "https://i.pinimg.com/1.jpg".into(),
+                    title: "Carved stone inventory frame".into(),
+                }],
+            },
+            Reference {
+                topic: ReferenceTopic::Music,
+                title: "Нічна тема".into(),
+                note: "Тиша між нотами".into(),
+                query: "dark ambient, low drones".into(),
+                palette: Vec::new(),
+                pins: Vec::new(),
+            },
+        ];
         let message = screen_message(&ScreenBrief {
             game_name: "Нічний злодій",
             pitch: "Стелс",
@@ -769,9 +833,14 @@ mod tests {
             sibling_titles: &titles,
             title: "HUD",
             summary: "Світлячки",
+            board: &board,
             reference: Some(("Головне меню", "<html>menu</html>")),
             revision: Some(("<html>hud</html>", "Збільш мінікарту")),
         });
+        assert!(message.contains("<references>\n- [Панелі й рамки] Кам’яні рамки"));
+        assert!(message.contains("на пінах: Carved stone inventory frame"));
+        assert!(!message.contains("dark ambient"));
+        assert!(describe_references(&board).contains("(звучання: «dark ambient, low drones»)"));
         assert!(message.contains("<reference_screen title=\"Головне меню\">"));
         assert!(message.contains("<current_screen>\n<html>hud</html>"));
         assert!(message.contains("Збільш мінікарту"));

@@ -1,8 +1,9 @@
-use noctics_shared::{AssetKind, StyleGuide};
+use noctics_shared::{AssetKind, Reference, ReferenceTopic, StyleGuide};
 use serde_json::{Value, json};
 
 use crate::comfy_recipes::valid_keyscale;
 use crate::comfy_store::Plan;
+use crate::prompts;
 
 const MAX_TITLE_CHARS: usize = 48;
 const DEFAULT_BPM: u32 = 120;
@@ -13,6 +14,47 @@ pub struct ProjectStyle<'a> {
     pub name: &'a str,
     pub pitch: &'a str,
     pub style: &'a StyleGuide,
+    pub references: &'a [Reference],
+}
+
+fn topics_for(kind: AssetKind) -> &'static [ReferenceTopic] {
+    match kind {
+        AssetKind::Concept => &[
+            ReferenceTopic::World,
+            ReferenceTopic::Characters,
+            ReferenceTopic::Light,
+            ReferenceTopic::Props,
+        ],
+        AssetKind::Sprite => &[
+            ReferenceTopic::Characters,
+            ReferenceTopic::Props,
+            ReferenceTopic::Animation,
+        ],
+        AssetKind::Texture => &[ReferenceTopic::Materials, ReferenceTopic::World],
+        AssetKind::Effect => &[ReferenceTopic::Vfx, ReferenceTopic::Light],
+        AssetKind::Interface => &[
+            ReferenceTopic::Interface,
+            ReferenceTopic::Panels,
+            ReferenceTopic::Buttons,
+            ReferenceTopic::Icons,
+        ],
+        AssetKind::Model => &[
+            ReferenceTopic::Characters,
+            ReferenceTopic::Props,
+            ReferenceTopic::Materials,
+        ],
+        AssetKind::Music => &[ReferenceTopic::Music],
+        AssetKind::Sound => &[ReferenceTopic::Sounds],
+    }
+}
+
+fn matching_references(kind: AssetKind, references: &[Reference]) -> Vec<Reference> {
+    let topics = topics_for(kind);
+    references
+        .iter()
+        .filter(|reference| topics.contains(&reference.topic))
+        .cloned()
+        .collect()
 }
 
 pub fn system_prompt() -> String {
@@ -75,6 +117,13 @@ pub fn message(kind: AssetKind, brief: &str, project: Option<&ProjectStyle<'_>>)
             project.style.mood,
             project.style.palette.join(", ")
         ));
+        let matching = matching_references(kind, project.references);
+        if !matching.is_empty() {
+            text.push_str(&format!(
+                "\nРеференси гри для цього типу ассета — бери з них форму, фактуру, світло, кольори й звучання:\n{}\n",
+                prompts::describe_references(&matching)
+            ));
+        }
     }
     text
 }
@@ -239,14 +288,40 @@ mod tests {
             corner_radius: 8,
             mood: "нуар під дощем".into(),
         };
+        let references = vec![
+            Reference {
+                topic: ReferenceTopic::Vfx,
+                title: "Іскри ліхтаря".into(),
+                note: "Теплі іскри".into(),
+                query: "game vfx ember sparks".into(),
+                palette: vec!["#f2aa4c".into()],
+                pins: Vec::new(),
+            },
+            Reference {
+                topic: ReferenceTopic::Sounds,
+                title: "Скрип заліза".into(),
+                note: "Сухий метал".into(),
+                query: "dry metallic creak".into(),
+                palette: Vec::new(),
+                pins: Vec::new(),
+            },
+        ];
         let project = ProjectStyle {
             name: "Ліхтарник",
             pitch: "стелс про злодія світла",
             style: &style,
+            references: &references,
         };
         let text = message(AssetKind::Sprite, "ліхтар", Some(&project));
         assert!(text.contains("«Ліхтарник»"));
         assert!(text.contains("#101820, #f2aa4c"));
         assert!(text.contains("Спрайт"));
+        assert!(!text.contains("Референси гри"));
+        let effect = message(AssetKind::Effect, "спалах", Some(&project));
+        assert!(effect.contains("Іскри ліхтаря"));
+        assert!(!effect.contains("Скрип заліза"));
+        let sound = message(AssetKind::Sound, "двері", Some(&project));
+        assert!(sound.contains("звучання: «dry metallic creak»"));
+        assert!(!sound.contains("Іскри ліхтаря"));
     }
 }

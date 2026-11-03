@@ -93,7 +93,13 @@ pub fn SkillsPage() -> Element {
         .filter(|skill| active_filter.admits(skill))
         .cloned()
         .collect();
-    let visible_count = visible.len();
+    let tallies: Vec<(Filter, usize)> = FILTERS
+        .into_iter()
+        .map(|option| {
+            let count = skills.read().iter().filter(|skill| option.admits(skill)).count();
+            (option, count)
+        })
+        .collect();
     let active_count = skills.read().iter().filter(|skill| skill.enabled).count();
 
     rsx! {
@@ -111,19 +117,18 @@ pub fn SkillsPage() -> Element {
                     "+ Нова навичка"
                 }
             }
-            div { class: "chip-row", role: "tablist", aria_label: "Напрям навичок",
-                for option in FILTERS {
+            div { class: "filter-tabs", role: "tablist", aria_label: "Напрям навичок",
+                for (option, count) in tallies {
                     button {
                         key: "{option.label()}",
-                        class: if option == active_filter { "chip is-active" } else { "chip" },
+                        class: if option == active_filter { "filter-tab is-active" } else { "filter-tab" },
                         r#type: "button",
                         role: "tab",
                         aria_selected: if option == active_filter { "true" } else { "false" },
                         onclick: move |_| filter.set(option),
-                        if option == active_filter {
-                            "{option.label()} · {visible_count}"
-                        } else {
-                            "{option.label()}"
+                        span { "{option.label()}" }
+                        if !loading() {
+                            span { class: "filter-tab-count", "{count}" }
                         }
                     }
                 }
