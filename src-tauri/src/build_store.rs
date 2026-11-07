@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use noctics_shared::{
-    Build, BuildError, BuildStatus, BuildTarget, GameEngine, SourceOrigin, SourceStatus,
+    Build, BuildError, BuildStatus, BuildTarget, GameEngine, PlaytestReport, PlaytestStatus, SourceOrigin,
+    SourceStatus,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -39,12 +40,26 @@ const SCHEMA: &str = "
         project_id INTEGER PRIMARY KEY,
         targets TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS playtests (
+        project_id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        run_dir TEXT NOT NULL,
+        round_dir TEXT NOT NULL DEFAULT '',
+        errors TEXT NOT NULL DEFAULT '',
+        activity TEXT NOT NULL DEFAULT '',
+        report TEXT,
+        error TEXT,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER
+    );
 ";
 const PLAN_SEPARATOR: char = ',';
 const REQUEUE_INTERRUPTED: &str =
     "UPDATE builds SET status = 'queued', started_at = NULL WHERE status = 'running'";
 const INTERRUPTED_GENERATION: &str =
     "Генерацію перервано: застосунок закрили. Запусти її ще раз.";
+const INTERRUPTED_PLAYTEST: &str = "Плейтест перервано: застосунок закрили. Запусти його ще раз.";
+const LINE_BREAK: &str = "\n";
 const SELECT_BUILD: &str = "SELECT id, project_id, target, status, artifact, size_bytes, log_tail, error, \
 created_at, started_at, finished_at, output_dir, log_path FROM builds";
 const HISTORY_LIMIT: i64 = 30;
@@ -58,6 +73,18 @@ pub struct StoredSource {
     pub status: SourceStatus,
     pub activity: Vec<String>,
     pub error: Option<String>,
+}
+
+pub struct StoredPlaytest {
+    pub status: PlaytestStatus,
+    pub run_dir: PathBuf,
+    pub round_dir: Option<PathBuf>,
+    pub errors: Vec<String>,
+    pub activity: Vec<String>,
+    pub report: Option<PlaytestReport>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
 }
 
 pub struct StoredBuild {
@@ -88,9 +115,147 @@ impl BuildStore {
                 ],
             )
             .map_err(storage)?;
+        connection
+            .execute(
+                "UPDATE playtests SET status = ?1, error = ?2, finished_at = ?3 WHERE status IN (?4, ?5)",
+                params![
+                    PlaytestStatus::Failed.code(),
+                    INTERRUPTED_PLAYTEST,
+                    unix_now(),
+                    PlaytestStatus::Capturing.code(),
+                    PlaytestStatus::Reviewing.code()
+                ],
+            )
+            .map_err(storage)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub fn begin_playtest(&self, project_id: i64, run_dir: &Path) -> Result<(), BuildError> {
+        let connection = self.lock()?;
+        if playtest_active(&connection, project_id)? {
+            return Err(BuildError::PlaytestBusy);
+        }
+        connection
+            .execute(
+                "INSERT INTO playtests (project_id, status, run_dir, round_dir, errors, activity, report, error, started_at, finished_at)
+                 VALUES (?1, ?2, ?3, '', '', '', NULL, NULL, ?4, NULL)
+                 ON CONFLICT(project_id) DO UPDATE SET
+                    status = excluded.status,
+                    run_dir = excluded.run_dir,
+                    round_dir = '',
+                    errors = '',
+                    activity = '',
+                    report = NULL,
+                    error = NULL,
+                    started_at = excluded.started_at,
+                    finished_at = NULL",
+                params![
+                    project_id,
+                    PlaytestStatus::Capturing.code(),
+                    run_dir.to_string_lossy(),
+                    unix_now()
+                ],
+            )
+            .map(drop)
+            .map_err(storage)
+    }
+
+    pub fn playtest_active(&self, project_id: i64) -> Result<bool, BuildError> {
+        playtest_active(&*self.lock()?, project_id)
+    }
+
+    pub fn set_playtest_status(&self, project_id: i64, status: PlaytestStatus) -> Result<(), BuildError> {
+        self.lock()?
+            .execute(
+                "UPDATE playtests SET status = ?1 WHERE project_id = ?2",
+                params![status.code(), project_id],
+            )
+            .map(drop)
+            .map_err(storage)
+    }
+
+    pub fn set_playtest_round(&self, project_id: i64, round_dir: &Path, errors: &[String]) -> Result<(), BuildError> {
+        self.lock()?
+            .execute(
+                "UPDATE playtests SET round_dir = ?1, errors = ?2 WHERE project_id = ?3",
+                params![round_dir.to_string_lossy(), errors.join(LINE_BREAK), project_id],
+            )
+            .map(drop)
+            .map_err(storage)
+    }
+
+    pub fn set_playtest_activity(&self, project_id: i64, activity: &[String]) -> Result<(), BuildError> {
+        let start = activity.len().saturating_sub(MAX_ACTIVITY);
+        self.lock()?
+            .execute(
+                "UPDATE playtests SET activity = ?1 WHERE project_id = ?2",
+                params![activity[start..].join(LINE_BREAK), project_id],
+            )
+            .map(drop)
+            .map_err(storage)
+    }
+
+    pub fn finish_playtest(
+        &self,
+        project_id: i64,
+        report: Option<&PlaytestReport>,
+        error: Option<&str>,
+    ) -> Result<(), BuildError> {
+        let status = if error.is_some() {
+            PlaytestStatus::Failed
+        } else {
+            PlaytestStatus::Done
+        };
+        let report = report
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|problem| BuildError::Storage(problem.to_string()))?;
+        self.lock()?
+            .execute(
+                "UPDATE playtests SET status = ?1, report = ?2, error = ?3, finished_at = ?4 WHERE project_id = ?5",
+                params![status.code(), report, error, unix_now(), project_id],
+            )
+            .map(drop)
+            .map_err(storage)
+    }
+
+    pub fn playtest(&self, project_id: i64) -> Result<Option<StoredPlaytest>, BuildError> {
+        self.lock()?
+            .query_row(
+                "SELECT status, run_dir, round_dir, errors, activity, report, error, started_at, finished_at
+                 FROM playtests WHERE project_id = ?1",
+                params![project_id],
+                |row| {
+                    let status: String = row.get(0)?;
+                    let round_dir: String = row.get(2)?;
+                    let report: Option<String> = row.get(5)?;
+                    Ok(StoredPlaytest {
+                        status: PlaytestStatus::from_code(&status).unwrap_or(PlaytestStatus::Failed),
+                        run_dir: PathBuf::from(row.get::<_, String>(1)?),
+                        round_dir: Some(round_dir).filter(|dir| !dir.is_empty()).map(PathBuf::from),
+                        errors: lines_of(&row.get::<_, String>(3)?),
+                        activity: lines_of(&row.get::<_, String>(4)?),
+                        report: report.and_then(|text| serde_json::from_str(&text).ok()),
+                        error: row.get(6)?,
+                        started_at: row.get(7)?,
+                        finished_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage)
+    }
+
+    pub fn has_active_builds(&self, project_id: i64) -> Result<bool, BuildError> {
+        self.lock()?
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM builds WHERE project_id = ?1 AND status IN (?2, ?3))",
+                params![project_id, BuildStatus::Queued.code(), BuildStatus::Running.code()],
+                |row| row.get(0),
+            )
+            .map_err(storage)
     }
 
     pub fn set_plan(&self, project_id: i64, targets: &[BuildTarget]) -> Result<(), BuildError> {
@@ -150,11 +315,7 @@ impl BuildStore {
                     origin: SourceOrigin::from_code(&origin).unwrap_or(SourceOrigin::Linked),
                     engine: GameEngine::from_code(&engine).unwrap_or_default(),
                     status: SourceStatus::from_code(&status).unwrap_or(SourceStatus::Failed),
-                    activity: activity
-                        .lines()
-                        .filter(|line| !line.is_empty())
-                        .map(str::to_owned)
-                        .collect(),
+                    activity: lines_of(&activity),
                     error,
                 })
             })
@@ -360,6 +521,27 @@ impl BuildStore {
     }
 }
 
+fn lines_of(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn playtest_active(connection: &Connection, project_id: i64) -> Result<bool, BuildError> {
+    connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM playtests WHERE project_id = ?1 AND status IN (?2, ?3))",
+            params![
+                project_id,
+                PlaytestStatus::Capturing.code(),
+                PlaytestStatus::Reviewing.code()
+            ],
+            |row| row.get(0),
+        )
+        .map_err(storage)
+}
+
 fn is_generating(connection: &Connection, project_id: i64) -> Result<bool, BuildError> {
     connection
         .query_row(
@@ -480,6 +662,49 @@ mod tests {
         assert_eq!(history[1].log_tail, "done");
         assert!(store.builds(8).unwrap().is_empty());
         assert_eq!(store.cancel_queued(99).err(), Some(BuildError::NotFound));
+    }
+
+    #[test]
+    fn keeps_one_playtest_per_game_and_its_report() {
+        let store = in_memory();
+        let run = Path::new("games/heist/.noctics/playtest/run-1");
+        assert!(store.playtest(5).unwrap().is_none());
+        store.begin_playtest(5, run).unwrap();
+        assert!(store.playtest_active(5).unwrap());
+        assert_eq!(store.begin_playtest(5, run), Err(BuildError::PlaytestBusy));
+        store
+            .set_playtest_round(5, &run.join("round-1"), &["SCRIPT ERROR: boom".into()])
+            .unwrap();
+        store.set_playtest_status(5, PlaytestStatus::Reviewing).unwrap();
+        store
+            .set_playtest_activity(5, &["Читає 01.png".into(), "Редагує player.gd".into()])
+            .unwrap();
+        let busy = store.playtest(5).unwrap().unwrap();
+        assert_eq!(busy.status, PlaytestStatus::Reviewing);
+        assert_eq!(busy.round_dir.as_deref(), Some(run.join("round-1").as_path()));
+        assert_eq!(busy.errors, ["SCRIPT ERROR: boom"]);
+        assert_eq!(busy.activity.len(), 2);
+
+        let report = PlaytestReport {
+            verdict: noctics_shared::PlaytestVerdict::Fixed,
+            summary: "Меню знову стартує гру".into(),
+            issues: Vec::new(),
+        };
+        store.finish_playtest(5, Some(&report), None).unwrap();
+        let done = store.playtest(5).unwrap().unwrap();
+        assert_eq!(done.status, PlaytestStatus::Done);
+        assert_eq!(done.report, Some(report));
+        assert!(done.finished_at.is_some() && !store.playtest_active(5).unwrap());
+
+        store.begin_playtest(5, run).unwrap();
+        let fresh = store.playtest(5).unwrap().unwrap();
+        assert!(fresh.report.is_none() && fresh.errors.is_empty() && fresh.round_dir.is_none());
+        store.finish_playtest(5, None, Some("Godot не знайдено")).unwrap();
+        assert_eq!(store.playtest(5).unwrap().unwrap().status, PlaytestStatus::Failed);
+
+        store.queue_build(5, BuildTarget::Web, Path::new("builds")).unwrap();
+        assert!(store.has_active_builds(5).unwrap());
+        assert!(!store.has_active_builds(6).unwrap());
     }
 
     #[test]

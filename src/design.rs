@@ -9,6 +9,7 @@ use crate::artifacts::ArtifactShelf;
 use crate::bridge;
 use crate::icons::CloseIcon;
 use crate::modal::Modal;
+use crate::open_design::OpenDesignSection;
 use crate::preview::ScreenPreview;
 use crate::studio::{
     Section, explain, output_status_label, output_status_tone, project_status_label,
@@ -198,7 +199,7 @@ pub fn ClaudeDesignPage() -> Element {
                 },
                 Some(_) => rsx! {
                     if let Some(loaded) = loaded.clone() {
-                        StyleBar { style: loaded.project.style.clone() }
+                        StyleBar { style: loaded.project.style.clone(), project_id: loaded.project.id }
                         div { class: "design-grid",
                             for screen in loaded.screens.iter().cloned() {
                                 DesignCard {
@@ -207,6 +208,10 @@ pub fn ClaudeDesignPage() -> Element {
                                     screen,
                                 }
                             }
+                        }
+                        OpenDesignSection {
+                            project_id: loaded.project.id,
+                            screens: loaded.screens.clone(),
                         }
                         SkillResults {
                             outputs: loaded.outputs.clone(),
@@ -411,10 +416,27 @@ fn preview_line(content: &str) -> String {
 }
 
 #[component]
-fn StyleBar(style: StyleGuide) -> Element {
+fn StyleBar(style: StyleGuide, project_id: i64) -> Element {
+    let studio = use_studio();
+    let mut restyling = use_signal(|| false);
+    let mut notice = use_signal(|| None::<String>);
     if style.palette.is_empty() {
         return rsx! {};
     }
+    let restyle = move |_| {
+        if restyling() {
+            return;
+        }
+        restyling.set(true);
+        notice.set(None);
+        spawn(async move {
+            match bridge::restyle_project(project_id).await {
+                Ok(_) => studio.changed(),
+                Err(problem) => notice.set(Some(explain(&problem))),
+            }
+            restyling.set(false);
+        });
+    };
     rsx! {
         div { class: "style-bar",
             span { class: "mono-label", "Стиль гри" }
@@ -423,12 +445,34 @@ fn StyleBar(style: StyleGuide) -> Element {
                     span {
                         key: "{index}",
                         class: "style-swatch",
-                        title: "{color}",
+                        title: match style.palette_note(index) {
+                            Some(note) => format!("{color} — {note}"),
+                            None => color.clone(),
+                        },
                         style: "background:{color}",
                     }
                 }
             }
             span { class: "style-summary", "{style.summary()}" }
+            button {
+                class: "ghost-button is-small style-restyle",
+                r#type: "button",
+                title: "Claude заново виведе палітру, шрифти й вигляд зі світу гри, а Claude Design перемалює всі екрани",
+                disabled: restyling(),
+                onclick: restyle,
+                if restyling() {
+                    span { class: "spinner" }
+                    "Виводжу стиль зі світу…"
+                } else {
+                    "Новий стиль і екрани"
+                }
+            }
+            if !style.look.trim().is_empty() {
+                p { class: "style-bar-look", "{style.look}" }
+            }
+            if let Some(message) = notice() {
+                p { class: "style-bar-warning", role: "alert", "{message}" }
+            }
         }
     }
 }

@@ -1,9 +1,14 @@
 use noctics_shared::{
-    AssetTask, Build, BuildOverview, BuildStatus, BuildTarget, ComfyOverview, DESIGN_STAGE, GameEngine,
-    Medium, OutputStatus, PinterestStatus, ProjectDetail, ProjectStatus, Readiness, RunStatus,
-    ScreenStatus, SkillOutput, SourceStatus, TaskStatus, format_size,
+    AssetHunt, AssetTask, Build, BuildOverview, BuildStatus, BuildTarget, ComfyOverview, DESIGN_STAGE, GameEngine,
+    HuntStatus, Medium, OutputStatus, PinterestStatus, PlaytestStatus, PlaytestVerdict, ProjectDetail, ProjectStatus,
+    Readiness, Reference, RunStatus, ScreenStatus, SkillOutput, SourceStatus, TaskStatus, format_size,
 };
 
+use noctics_shared::{MixamoOverview, MotionOrder, MotionStatus, engine_takes_motions};
+use noctics_shared::{DesignRunStatus, OpenDesignBoard};
+
+use crate::asset_hunt::{HUNT_NOTE, HUNT_TITLE, found_summary, searching_note};
+use crate::open_design::{VARIANT_WORDS, status_label, variants_summary};
 use crate::journal::plural;
 use crate::studio::explain;
 
@@ -14,6 +19,7 @@ const BUILD_SPACING: f64 = 178.0;
 const VISIBLE_ROWS: usize = 5;
 const VISIBLE_IMAGES: usize = 6;
 const VISIBLE_LOG_LINES: usize = 3;
+const VISIBLE_FRAMES: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Phase {
@@ -108,6 +114,10 @@ pub enum NodeId {
     Screens,
     Code,
     Assets,
+    Finds,
+    Animations,
+    OpenDesign,
+    Playtest,
     Builds,
     Build(BuildTarget),
 }
@@ -123,6 +133,10 @@ impl NodeId {
             Self::Screens => "screens".to_owned(),
             Self::Code => "code".to_owned(),
             Self::Assets => "assets".to_owned(),
+            Self::Finds => "finds".to_owned(),
+            Self::Animations => "animations".to_owned(),
+            Self::OpenDesign => "open-design".to_owned(),
+            Self::Playtest => "playtest".to_owned(),
             Self::Builds => "builds".to_owned(),
             Self::Build(target) => format!("build-{}", target.code()),
         }
@@ -175,6 +189,22 @@ const PACKAGE: Port = Port {
     label: "пакет",
     cable: Cable::Package,
 };
+const FOUND: Port = Port {
+    label: "знахідки",
+    cable: Cable::Visual,
+};
+const MOTIONS: Port = Port {
+    label: "анімації",
+    cable: Cable::Visual,
+};
+const VARIANTS: Port = Port {
+    label: "варіації",
+    cable: Cable::Visual,
+};
+const TESTED: Port = Port {
+    label: "перевірено",
+    cable: Cable::Code,
+};
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Row {
@@ -188,6 +218,7 @@ pub enum Body {
     Prompt { text: String, chips: Vec<String> },
     Plan { name: String, pitch: String, palette: Vec<String>, chips: Vec<String> },
     Gallery { images: Vec<String> },
+    Frames { images: Vec<String> },
     Rows { rows: Vec<Row>, hidden: usize },
     Log { lines: Vec<String> },
     Empty,
@@ -208,6 +239,12 @@ pub struct Node {
     pub home: (f64, f64),
     pub width: f64,
     pub since: Option<i64>,
+}
+
+impl Node {
+    pub fn passed(&self) -> bool {
+        self.phase == Phase::Done && self.progress.is_none_or(|(done, total)| done == total)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -243,11 +280,21 @@ pub struct Snapshot {
     pub overview: Option<BuildOverview>,
     pub comfy: Option<ComfyOverview>,
     pub pinterest: Option<PinterestStatus>,
+    pub hunt: Option<AssetHunt>,
+    pub mixamo: Option<MixamoOverview>,
+    pub open_design: Option<OpenDesignBoard>,
 }
 
 impl Snapshot {
     pub fn project_id(&self) -> Option<i64> {
         self.detail.as_ref().map(|detail| detail.project.id)
+    }
+
+    pub fn project_motions(&self) -> Vec<&MotionOrder> {
+        match (self.project_id(), &self.mixamo) {
+            (Some(project_id), Some(mixamo)) => mixamo.for_project(project_id),
+            _ => Vec::new(),
+        }
     }
 
     pub fn project_tasks(&self) -> Vec<&AssetTask> {
@@ -342,6 +389,10 @@ pub fn build_graph(snapshot: &Snapshot, draft: &Draft) -> Graph {
         screens_node(detail, planned),
         code_node(detail, snapshot.overview.as_ref(), draft.engine),
         assets_node(&snapshot.project_tasks(), snapshot.overview.as_ref()),
+        finds_node(detail, snapshot.hunt.as_ref(), planned),
+        animations_node(snapshot, draft.engine),
+        open_design_node(detail, snapshot.open_design.as_ref(), planned),
+        playtest_node(snapshot.overview.as_ref(), detail.map_or(draft.engine, |detail| detail.project.engine)),
     ];
     if targets.is_empty() {
         nodes.push(builds_placeholder(detail.is_some()));
@@ -366,15 +417,29 @@ pub fn build_graph(snapshot: &Snapshot, draft: &Draft) -> Graph {
         (NodeId::Skills, 0, NodeId::Code, 1),
         (NodeId::Code, 1, NodeId::Assets, 0),
         (NodeId::References, 0, NodeId::Assets, 1),
+        (NodeId::Plan, 0, NodeId::Finds, 0),
+        (NodeId::References, 0, NodeId::Finds, 1),
+        (NodeId::Finds, 0, NodeId::Code, 2),
+        (NodeId::Code, 1, NodeId::Animations, 0),
+        (NodeId::Plan, 1, NodeId::OpenDesign, 0),
+        (NodeId::References, 0, NodeId::OpenDesign, 1),
+        (NodeId::Code, 0, NodeId::Playtest, 0),
+        (NodeId::Screens, 0, NodeId::Playtest, 1),
     ];
+    let tested = playtest_feeds_builds(snapshot.overview.as_ref(), detail.map_or(draft.engine, |detail| detail.project.engine));
     let sinks: Vec<NodeId> = if targets.is_empty() {
         vec![NodeId::Builds]
     } else {
         targets.iter().map(|target| NodeId::Build(*target)).collect()
     };
     for sink in sinks {
-        links.push((NodeId::Code, 0, sink, 0));
+        links.push(if tested {
+            (NodeId::Playtest, 0, sink, 0)
+        } else {
+            (NodeId::Code, 0, sink, 0)
+        });
         links.push((NodeId::Assets, 0, sink, 1));
+        links.push((NodeId::Animations, 0, sink, 2));
     }
 
     let wires = links
@@ -432,8 +497,12 @@ fn home_of(id: NodeId) -> (f64, f64) {
         NodeId::Skills => (COLUMN * 3.0, 380.0),
         NodeId::Code => (COLUMN * 4.0, 170.0),
         NodeId::Assets => (COLUMN * 5.0, 20.0),
-        NodeId::Builds => (COLUMN * 6.0, 120.0),
-        NodeId::Build(_) => (COLUMN * 6.0, 0.0),
+        NodeId::Finds => (COLUMN * 3.0, 700.0),
+        NodeId::Animations => (COLUMN * 5.0, 380.0),
+        NodeId::OpenDesign => (COLUMN * 4.0, 560.0),
+        NodeId::Playtest => (COLUMN * 6.0, 150.0),
+        NodeId::Builds => (COLUMN * 7.0, 120.0),
+        NodeId::Build(_) => (COLUMN * 7.0, 0.0),
     }
 }
 
@@ -515,12 +584,17 @@ fn references_node(detail: Option<&ProjectDetail>, pinterest: Option<&PinterestS
         .iter()
         .filter(|reference| !reference.topic.is_audio())
         .collect();
-    let pinned = visual.iter().filter(|reference| !reference.pins.is_empty()).count();
+    let pinned = visual.iter().filter(|reference| has_pictures(reference)).count();
     let loading = pinterest.is_some_and(|status| status.is_loading(project.id));
     let images: Vec<String> = visual
         .iter()
-        .filter_map(|reference| reference.pins.first())
-        .map(|pin| pin.image.clone())
+        .filter_map(|reference| {
+            reference
+                .pins
+                .first()
+                .map(|pin| pin.image.clone())
+                .or_else(|| reference.artworks.first().map(|artwork| artwork.image.clone()))
+        })
         .take(VISIBLE_IMAGES)
         .collect();
 
@@ -546,7 +620,7 @@ fn references_node(detail: Option<&ProjectDetail>, pinterest: Option<&PinterestS
             .references
             .iter()
             .map(|reference| Row {
-                phase: if reference.pins.is_empty() { Phase::Idle } else { Phase::Done },
+                phase: if has_pictures(reference) { Phase::Done } else { Phase::Idle },
                 text: reference.title.clone(),
                 tag: Some(reference.topic.label().to_owned()),
             })
@@ -556,6 +630,10 @@ fn references_node(detail: Option<&ProjectDetail>, pinterest: Option<&PinterestS
         Body::Gallery { images }
     };
     node
+}
+
+fn has_pictures(reference: &Reference) -> bool {
+    !reference.pins.is_empty() || !reference.artworks.is_empty()
 }
 
 pub fn stage_outputs(detail: &ProjectDetail, id: NodeId) -> Vec<&SkillOutput> {
@@ -667,7 +745,7 @@ fn code_node(detail: Option<&ProjectDetail>, overview: Option<&BuildOverview>, d
         "Код гри",
         engine.label(),
         Cable::Code,
-        &[SCREENS, TEXTS],
+        &[SCREENS, TEXTS, FOUND],
         &[SOURCE, ORDERS],
     );
     let source = overview.and_then(|overview| overview.source.as_ref());
@@ -784,8 +862,321 @@ fn assets_node(tasks: &[&AssetTask], overview: Option<&BuildOverview>) -> Node {
     node
 }
 
+fn finds_node(detail: Option<&ProjectDetail>, hunt: Option<&AssetHunt>, planned: bool) -> Node {
+    let mut node = shell(
+        NodeId::Finds,
+        HUNT_TITLE,
+        HUNT_NOTE,
+        Cable::Visual,
+        &[DOCUMENT, BOARD],
+        &[FOUND],
+    );
+    if detail.filter(|_| planned).is_none() {
+        node.summary = "Почне шукати, щойно буде план гри".to_owned();
+        return node;
+    }
+    let Some(hunt) = hunt else {
+        node.summary = "Ще не шукали — відкрий вузол і натисни «Знайти ассети»".to_owned();
+        return node;
+    };
+    match hunt.status {
+        HuntStatus::Queued => {
+            node.phase = Phase::Queued;
+            node.summary = "У черзі на пошук".to_owned();
+        }
+        HuntStatus::Searching => {
+            node.phase = Phase::Working;
+            node.summary = searching_note();
+            node.since = hunt.started_at;
+        }
+        HuntStatus::Done => {
+            node.phase = Phase::Done;
+            node.summary = found_summary(hunt);
+        }
+        HuntStatus::Failed => {
+            node.phase = Phase::Failed;
+            node.summary = hunt
+                .error
+                .as_ref()
+                .map_or_else(|| "Пошук не вдався".to_owned(), explain);
+        }
+    }
+    let images: Vec<String> = hunt
+        .finds
+        .iter()
+        .filter_map(|find| find.image.clone())
+        .take(VISIBLE_IMAGES)
+        .collect();
+    node.body = if images.is_empty() {
+        trimmed_rows(
+            hunt.finds
+                .iter()
+                .map(|find| Row {
+                    phase: if find.cost.downloadable() { Phase::Done } else { Phase::Idle },
+                    text: find.title.clone(),
+                    tag: Some(find.kind.label().to_owned()),
+                })
+                .collect(),
+        )
+    } else {
+        Body::Gallery { images }
+    };
+    node
+}
+
+fn open_design_node(detail: Option<&ProjectDetail>, board: Option<&OpenDesignBoard>, planned: bool) -> Node {
+    let mut node = shell(
+        NodeId::OpenDesign,
+        "Варіації дизайну",
+        "Open Design",
+        Cable::Visual,
+        &[STYLE, BOARD],
+        &[VARIANTS],
+    );
+    let Some(detail) = detail.filter(|_| planned) else {
+        node.summary = "Почне разом із Claude Design".to_owned();
+        return node;
+    };
+    let Some(board) = board else {
+        node.summary = "Перевіряємо Open Design…".to_owned();
+        return node;
+    };
+    if !board.installed {
+        node.phase = Phase::Review;
+        node.summary = "Open Design не встановлено".to_owned();
+        return node;
+    }
+    let screens: Vec<u32> = detail.screens.iter().map(|screen| screen.position).collect();
+    let covered = screens
+        .iter()
+        .filter(|position| !board.for_screen(**position).is_empty())
+        .count();
+    node.progress = (!screens.is_empty() && board.rounds > 0).then_some((covered, screens.len()));
+    match board.status {
+        DesignRunStatus::WaitingReferences => {
+            node.phase = Phase::Queued;
+            node.summary = "Чекає на референси Pinterest і ArtStation".to_owned();
+            node.since = board.started_at;
+        }
+        DesignRunStatus::Starting | DesignRunStatus::Running => {
+            node.phase = Phase::Working;
+            node.summary = format!(
+                "Генерує · {}",
+                plural(board.variants.len() as u32, VARIANT_WORDS)
+            );
+            node.since = board.started_at;
+        }
+        DesignRunStatus::Done => {
+            node.phase = Phase::Done;
+            node.summary = variants_summary(board);
+        }
+        DesignRunStatus::Failed => {
+            node.phase = Phase::Failed;
+            node.summary = board
+                .error
+                .clone()
+                .unwrap_or_else(|| status_label(board.status).to_owned());
+        }
+        DesignRunStatus::Idle => {
+            node.summary = "Ще не запускали — відкрий вузол".to_owned();
+        }
+    }
+    node.body = trimmed_rows(
+        board
+            .variants
+            .iter()
+            .map(|variant| Row {
+                phase: Phase::Done,
+                text: variant.title.clone(),
+                tag: Some(match variant.screen {
+                    Some(position) => format!("{position:02} · {}", variant.source.short_label()),
+                    None => variant.source.short_label().to_owned(),
+                }),
+            })
+            .collect(),
+    );
+    node
+}
+
+fn animations_node(snapshot: &Snapshot, draft_engine: GameEngine) -> Node {
+    let mut node = shell(NodeId::Animations, "Анімації", "Mixamo", Cable::Visual, &[ORDERS], &[MOTIONS]);
+    let detail = snapshot.detail.as_ref();
+    let engine = detail.map_or(draft_engine, |detail| detail.project.engine);
+    let signed_in = snapshot.mixamo.as_ref().and_then(|mixamo| mixamo.status.signed_in);
+    let orders = snapshot.project_motions();
+    if orders.is_empty() {
+        let coding = snapshot
+            .overview
+            .as_ref()
+            .and_then(|overview| overview.source.as_ref())
+            .is_some_and(|source| source.status == SourceStatus::Generating);
+        node.summary = if !engine_takes_motions(engine) {
+            format!("{} — 2D-рушій, анімації скелета не потрібні", engine.label())
+        } else if signed_in == Some(false) {
+            "Увійди в Mixamo — і агент братиме анімації звідти".to_owned()
+        } else if detail.is_none() {
+            "Анімації персонажів прийдуть з Mixamo".to_owned()
+        } else if coding {
+            "Агент ще не замовив анімацій".to_owned()
+        } else {
+            "Агент замовить анімації з Mixamo, коли писатиме код".to_owned()
+        };
+        return node;
+    }
+    let rows: Vec<Row> = orders
+        .iter()
+        .map(|order| Row {
+            phase: motion_phase(order.status),
+            text: order.name.clone(),
+            tag: order.clip.as_ref().map(|clip| clip.name.clone()).filter(|name| !name.is_empty()),
+        })
+        .collect();
+    let waiting = orders.iter().filter(|order| order.status == MotionStatus::Queued).count();
+    node.progress = Some((count(&rows, Phase::Done), rows.len()));
+    if signed_in == Some(false) && waiting > 0 {
+        node.phase = Phase::Review;
+        node.summary = format!(
+            "Увійди в Mixamo — {} чекають у черзі",
+            plural(waiting as u32, ["анімація", "анімації", "анімацій"])
+        );
+    } else {
+        node.phase = strongest(&rows);
+        node.summary = group_summary(
+            node.phase,
+            &rows,
+            "Усі анімації запечено",
+            |title| format!("Запікає «{title}»"),
+            |title| format!("«{title}» не вдалося"),
+            ["анімація", "анімації", "анімацій"],
+        );
+    }
+    let images: Vec<String> = orders
+        .iter()
+        .filter_map(|order| order.clip.as_ref())
+        .map(|clip| clip.preview().to_owned())
+        .filter(|preview| !preview.is_empty())
+        .take(VISIBLE_IMAGES)
+        .collect();
+    node.body = if images.is_empty() {
+        trimmed_rows(rows)
+    } else {
+        Body::Gallery { images }
+    };
+    node
+}
+
+pub fn motion_phase(status: MotionStatus) -> Phase {
+    match status {
+        MotionStatus::Queued => Phase::Queued,
+        MotionStatus::Searching | MotionStatus::Exporting | MotionStatus::Downloading => Phase::Working,
+        MotionStatus::Done => Phase::Done,
+        MotionStatus::Failed => Phase::Failed,
+    }
+}
+
+fn playtest_feeds_builds(overview: Option<&BuildOverview>, engine: GameEngine) -> bool {
+    overview.map_or(engine == GameEngine::Godot, |overview| overview.playtest.blocked.is_none())
+}
+
+fn playtest_node(overview: Option<&BuildOverview>, engine: GameEngine) -> Node {
+    let mut node = shell(
+        NodeId::Playtest,
+        "Плейтест",
+        "бот · Claude",
+        Cable::Code,
+        &[SOURCE, SCREENS],
+        &[TESTED],
+    );
+    node.width = WIDE_NODE_WIDTH;
+    let Some(overview) = overview else {
+        node.summary = if engine == GameEngine::Godot {
+            "Бот зіграє в гру, щойно буде код".to_owned()
+        } else {
+            "Поки грає лише в ігри на Godot".to_owned()
+        };
+        return node;
+    };
+    let playtest = &overview.playtest;
+    let Some(run) = &playtest.run else {
+        node.summary = match &playtest.blocked {
+            Some(reason) => reason.clone(),
+            None if overview.can_build() => "Готовий зіграти — відкрий вузол".to_owned(),
+            None => "Зіграє сам, щойно код гри буде готовий".to_owned(),
+        };
+        return node;
+    };
+    node.since = run.status.is_active().then_some(run.started_at);
+    match run.status {
+        PlaytestStatus::Capturing => {
+            node.phase = Phase::Working;
+            node.summary = if !run.activity.is_empty() {
+                "Бот грає фінальний прогін".to_owned()
+            } else {
+                "Бот грає в гру й знімає кадри".to_owned()
+            };
+        }
+        PlaytestStatus::Reviewing => {
+            node.phase = Phase::Working;
+            node.summary = "Claude дивиться кадри й виправляє гру".to_owned();
+        }
+        PlaytestStatus::Failed => {
+            node.phase = Phase::Failed;
+            node.summary = run.error.clone().unwrap_or_else(|| "Плейтест не вдався".to_owned());
+        }
+        PlaytestStatus::Done => match &run.report {
+            None => {
+                node.phase = Phase::Done;
+                node.summary = "Плейтест завершено".to_owned();
+            }
+            Some(report) => {
+                let open = report.open();
+                node.progress = (!report.issues.is_empty()).then_some((report.fixed(), report.issues.len()));
+                (node.phase, node.summary) = match report.verdict {
+                    PlaytestVerdict::Passed => (Phase::Done, "Гра пройшла плейтест".to_owned()),
+                    PlaytestVerdict::Fixed if open == 0 => (
+                        Phase::Done,
+                        format!("Виправлено {}", plural(report.fixed() as u32, ["проблему", "проблеми", "проблем"])),
+                    ),
+                    PlaytestVerdict::Fixed | PlaytestVerdict::NeedsWork if open > 0 => (
+                        Phase::Review,
+                        format!("Лишилось {} — глянь звіт", plural(open as u32, ["проблема", "проблеми", "проблем"])),
+                    ),
+                    PlaytestVerdict::Fixed | PlaytestVerdict::NeedsWork => {
+                        (Phase::Review, "Гра ще потребує доробки — глянь звіт".to_owned())
+                    }
+                };
+            }
+        },
+    }
+    let frames: Vec<String> = run
+        .shots
+        .iter()
+        .rev()
+        .take(VISIBLE_FRAMES)
+        .rev()
+        .map(|shot| shot.thumb.clone())
+        .collect();
+    node.body = if !frames.is_empty() {
+        Body::Frames { images: frames }
+    } else if !run.activity.is_empty() {
+        Body::Log {
+            lines: run.activity.iter().rev().take(VISIBLE_LOG_LINES).rev().cloned().collect(),
+        }
+    } else {
+        Body::Empty
+    };
+    node
+}
+
 fn builds_placeholder(has_project: bool) -> Node {
-    let mut node = shell(NodeId::Builds, "Білди", "платформи", Cable::Package, &[SOURCE, FILES], &[PACKAGE]);
+    let mut node = shell(
+        NodeId::Builds,
+        "Білди",
+        "платформи",
+        Cable::Package,
+        &[SOURCE, FILES, MOTIONS],
+        &[PACKAGE],
+    );
     node.summary = if has_project {
         "Платформи не обрано — вибери їх тут".to_owned()
     } else {
@@ -800,7 +1191,7 @@ fn build_node(target: BuildTarget, index: usize, overview: Option<&BuildOverview
         &format!("Білд {}", target.label()),
         target.package(),
         Cable::Package,
-        &[SOURCE, FILES],
+        &[SOURCE, FILES, MOTIONS],
         &[PACKAGE],
     );
     let (x, y) = home_of(node.id);

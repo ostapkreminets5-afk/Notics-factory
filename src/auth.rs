@@ -9,7 +9,7 @@ use noctics_shared::{
 
 use crate::bridge;
 use crate::icons::ArrowRightIcon;
-use crate::pipeline::PipelineCanvas;
+use crate::night_sky::NightSky;
 
 const SHAKE_ANIMATION: &str = "form-shake";
 
@@ -39,7 +39,7 @@ pub fn AuthScreen(initial_mode: AuthMode, on_signed_in: EventHandler<Session>) -
 fn Showcase() -> Element {
     rsx! {
         section { class: "showcase",
-            PipelineCanvas {}
+            NightSky {}
             header { class: "showcase-top mono-label",
                 span { "AI-ядро Noctics" }
                 span { "6 етапів · промпт → збірка" }
@@ -50,7 +50,7 @@ fn Showcase() -> Element {
                     span { class: "accent", "Створюй." }
                 }
                 p { class: "lead",
-                    "Система створення ігор для тих, хто не спить, коли місто спить. Ядро ШІ проводить ідею через п’ять систем і збирає готову гру."
+                    "Система створення ігор для тих, хто не спить, коли місто спить. Ядро ШІ веде ідею через шість етапів — від промпту до готової гри."
                 }
                 p { class: "mono-label", "Windows · macOS · Linux" }
             }

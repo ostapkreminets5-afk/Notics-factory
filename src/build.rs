@@ -5,13 +5,13 @@ use dioxus::prelude::*;
 use dioxus_logger::tracing;
 use noctics_shared::{
     Build, BuildError, BuildFamily, BuildOverview, BuildStatus, BuildTarget, GameEngine, GameSource,
-    MAX_BUILD_REQUEST_CHARS, MAX_SOURCE_PATH_CHARS, Project, Readiness, SourceOrigin, SourceStatus,
-    format_duration, format_size, project_marker,
+    MAX_BUILD_REQUEST_CHARS, MAX_SOURCE_PATH_CHARS, Playtest, PlaytestStatus, PlaytestVerdict, Project, Readiness,
+    SourceOrigin, SourceStatus, format_duration, format_size, project_marker,
 };
 use wasm_bindgen::JsValue;
 
 use crate::bridge;
-use crate::build_bridge::{self, BUILDS_FOLDER, SOURCE_FOLDER};
+use crate::build_bridge::{self, BUILDS_FOLDER, PLAYTEST_FOLDER, SOURCE_FOLDER};
 use crate::icons::{ArrowRightIcon, ExternalIcon};
 use crate::studio::{Section, explain, use_studio};
 
@@ -199,6 +199,7 @@ fn BuildBoard(project: Project) -> Element {
             if loaded {
                 div { class: "build-stack",
                     SourceCard { project: project.clone() }
+                    PlaytestCard {}
                     TargetsCard {}
                     HistoryCard {}
                 }
@@ -650,6 +651,166 @@ pub fn PlanCard() -> Element {
 }
 
 #[component]
+fn PlaytestCard() -> Element {
+    let board = use_context::<Board>();
+    let mut starting = use_signal(|| false);
+    let Some(overview) = (board.overview)() else {
+        return rsx! {};
+    };
+    let playtest = overview.playtest.clone();
+    let run = playtest.run.clone();
+    let active = playtest.is_active();
+    let source_ready = overview
+        .source
+        .as_ref()
+        .is_some_and(|source| source.valid && source.status != SourceStatus::Generating);
+    let can_start = playtest.blocked.is_none() && source_ready && !active && !starting();
+    let note = match (&playtest.blocked, &run) {
+        (Some(reason), _) => reason.clone(),
+        (None, None) => "Бот відкриє гру у вікні, сам пройде меню, побігає, постріляє й поставить паузу, знімаючи кадри. Claude порівняє їх із макетами Claude Design, виправить, що криво, і бот перевірить гру ще раз."
+            .to_owned(),
+        (None, Some(run)) => playtest_note(run),
+    };
+    let scenes = run.as_ref().map(|run| run.scenes.join(" → ")).unwrap_or_default();
+    let failures = run.as_ref().map(|run| run.errors.join(LINE_BREAK)).unwrap_or_default();
+
+    let start = move |_| {
+        if starting() {
+            return;
+        }
+        starting.set(true);
+        spawn(async move {
+            board.settle(build_bridge::start_playtest(board.project_id).await);
+            starting.set(false);
+        });
+    };
+
+    let stop = move |_| {
+        spawn(async move {
+            board.report(build_bridge::stop_playtest(board.project_id).await);
+        });
+    };
+
+    let open_frames = move |_| {
+        spawn(async move {
+            board.report(build_bridge::open_folder(board.project_id, PLAYTEST_FOLDER).await);
+        });
+    };
+
+    rsx! {
+        section { class: "build-card",
+            CardHead { step: "02", title: "Плейтест", note: note.clone() }
+            if active {
+                div { class: "build-progress",
+                    span { class: "spinner" }
+                    span { class: "build-progress-title", "{note}" }
+                    button { class: "ghost-button is-small", r#type: "button", onclick: stop, "Зупинити" }
+                }
+            }
+            if let Some(run) = &run {
+                if let Some(report) = &run.report {
+                    div { class: "playtest-verdict is-{verdict_code(report.verdict)}",
+                        p { class: "playtest-verdict-title", "{report.verdict.label()}" }
+                        if !report.summary.is_empty() {
+                            p { class: "playtest-verdict-text", "{report.summary}" }
+                        }
+                        if !report.issues.is_empty() {
+                            ul { class: "playtest-issues",
+                                for (index, issue) in report.issues.iter().enumerate() {
+                                    li { key: "{index}", class: if issue.fixed { "playtest-issue is-fixed" } else { "playtest-issue" },
+                                        span {
+                                            class: "playtest-issue-mark",
+                                            title: if issue.fixed { "Виправлено" } else { "Лишилось" },
+                                        }
+                                        span { "{issue.text}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(problem) = &run.error {
+                    p { class: "build-alert", "{problem}" }
+                }
+                if run.finished_early {
+                    p { class: "build-alert", "Гра закрилась сама раніше, ніж бот дограв." }
+                }
+                if !run.shots.is_empty() {
+                    if !scenes.is_empty() {
+                        span { class: "mono-label", "Сцени: {scenes}" }
+                    }
+                    div { class: "playtest-shots",
+                        for (index, shot) in run.shots.iter().enumerate() {
+                            figure { key: "{index}", class: if shot.blank { "playtest-shot is-blank" } else { "playtest-shot" },
+                                img { src: "{shot.thumb}", alt: "{shot.label}", draggable: "false", "loading": "lazy" }
+                                figcaption {
+                                    span { class: "playtest-shot-label", title: "{shot.scene}", "{shot.label}" }
+                                    if shot.blank {
+                                        span { class: "playtest-shot-flag", "порожній" }
+                                    }
+                                    span { class: "playtest-shot-time", "{shot.second} с" }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !failures.is_empty() {
+                    pre { class: "build-log", "{failures}" }
+                }
+                ActivityFeed { lines: run.activity.clone() }
+            }
+            div { class: "build-actions",
+                button {
+                    class: "primary-button",
+                    r#type: "button",
+                    disabled: !can_start,
+                    onclick: start,
+                    if starting() {
+                        span { class: "spinner" }
+                        "Запускаємо…"
+                    } else if run.is_some() {
+                        "Зіграти ще раз"
+                    } else {
+                        "Запустити плейтест"
+                    }
+                }
+                if run.is_some() {
+                    button { class: "ghost-button", r#type: "button", onclick: open_frames,
+                        "Папка кадрів"
+                        ExternalIcon {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+const LINE_BREAK: &str = "\n";
+
+fn playtest_note(run: &Playtest) -> String {
+    match run.status {
+        PlaytestStatus::Capturing if run.activity.is_empty() => {
+            "Бот грає в гру й знімає кадри — вікно гри відкриється приблизно на 40 секунд.".to_owned()
+        }
+        PlaytestStatus::Capturing => "Бот грає фінальний прогін після виправлень.".to_owned(),
+        PlaytestStatus::Reviewing => "Claude дивиться кадри, порівнює з макетами й виправляє гру.".to_owned(),
+        PlaytestStatus::Failed => "Плейтест не вдався.".to_owned(),
+        PlaytestStatus::Done => run
+            .report
+            .as_ref()
+            .map_or_else(|| "Плейтест завершено.".to_owned(), |report| format!("{}.", report.verdict.label())),
+    }
+}
+
+fn verdict_code(verdict: PlaytestVerdict) -> &'static str {
+    match verdict {
+        PlaytestVerdict::Passed => "passed",
+        PlaytestVerdict::Fixed => "fixed",
+        PlaytestVerdict::NeedsWork => "needs_work",
+    }
+}
+
+#[component]
 fn TargetsCard() -> Element {
     let board = use_context::<Board>();
     let studio = use_studio();
@@ -710,7 +871,7 @@ fn TargetsCard() -> Element {
 
     rsx! {
         section { class: "build-card",
-            CardHead { step: "02", title: "Варіанти білду", note }
+            CardHead { step: "03", title: "Варіанти білду", note }
             TargetGrid { choices }
             div { class: "build-actions is-spread",
                 PlanShortcuts { supported, picked }
@@ -748,7 +909,7 @@ fn HistoryCard() -> Element {
     let note = format!("Готові файли лежать у {}", overview.output_dir);
     rsx! {
         section { class: "build-card",
-            CardHead { step: "03", title: "Збірки", note }
+            CardHead { step: "04", title: "Збірки", note }
             if overview.builds.is_empty() {
                 p { class: "build-empty", "Ще нічого не збирали — обери платформи вище й натисни «Зібрати»." }
             } else {
@@ -941,6 +1102,8 @@ pub fn explain_build(problem: &BuildError) -> String {
         BuildError::NotFound => "Цього проєкту чи збірки вже немає.".to_owned(),
         BuildError::NoSource => "Спершу потрібен код гри: згенеруй його або підключи папку.".to_owned(),
         BuildError::SourceBusy => "Claude ще пише код гри — зачекай або зупини генерацію.".to_owned(),
+        BuildError::PlaytestBusy => "Зараз іде плейтест — зачекай, поки він закінчиться, або зупини його.".to_owned(),
+        BuildError::PlaytestUnavailable(reason) => reason.clone(),
         BuildError::SourceInvalid => {
             "У цій папці немає головного файлу проєкту обраного рушія — перевір шлях або рушій.".to_owned()
         }

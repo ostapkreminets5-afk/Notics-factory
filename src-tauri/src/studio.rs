@@ -5,12 +5,15 @@ use std::time::{Duration, Instant};
 
 use noctics_shared::{
     ART_SKILL, ClaudeAccount, DESIGN_STAGE, GameEngine, Project, SCREEN_SKILLS, Skill, SkillCategory,
-    StudioError, runs_as_deliverable,
+    StudioError, guides_the_agent, runs_as_deliverable,
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::asset_hunt::Hunter;
 use crate::builder::Builder;
 use crate::claude_code::{ClaudeCode, Completion, Effort};
+use crate::artstation::{ArtStation, Scope};
+use crate::open_design;
 use crate::pinterest::{Pinterest, Refresh};
 use crate::prompts::{self, ReferenceBrief, ScreenBrief};
 use crate::skills::SkillStore;
@@ -135,12 +138,16 @@ impl Studio {
                     prompt,
                     engine,
                 } => {
-                    let outcome = self.plan(&prompt, engine).await;
+                    let outcome = self.plan(project_id, &prompt, engine).await;
                     let _ = match outcome {
                         Ok(plan) => self
                             .deliverable_skills()
                             .and_then(|skills| self.store.apply_plan(project_id, &plan, &skills))
-                            .inspect(|_| self.collect_pins(project_id)),
+                            .inspect(|_| {
+                                self.collect_references(project_id);
+                                self.hunt_assets(project_id);
+                                open_design::start_for_plan(&self.app, project_id);
+                            }),
                         Err(problem) => self.store.fail_project(project_id, &problem),
                     };
                     self.notify();
@@ -169,7 +176,7 @@ impl Studio {
         }
     }
 
-    fn advance(&self, project_id: i64) {
+    pub fn advance(&self, project_id: i64) {
         if !self.store.ready_for_code(project_id).unwrap_or(false) {
             return;
         }
@@ -179,11 +186,18 @@ impl Studio {
         }
     }
 
-    async fn plan(&self, prompt: &str, engine: GameEngine) -> Result<prompts::Plan, StudioError> {
+    async fn plan(&self, project_id: i64, prompt: &str, engine: GameEngine) -> Result<prompts::Plan, StudioError> {
+        let earlier: Vec<Project> = self
+            .store
+            .list_projects()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|project| project.id != project_id)
+            .collect();
         let answer = self
             .ask(Completion {
                 system: prompts::system_prompt(&[]),
-                user: prompts::plan_message(prompt, engine),
+                user: prompts::plan_message(prompt, engine, &earlier),
                 effort: Effort::High,
                 schema: Some(prompts::plan_schema()),
             })
@@ -212,13 +226,51 @@ impl Studio {
         let updated = self
             .store
             .set_reference_board(project_id, &board.analysis, &board.references)?;
-        self.collect_pins(project_id);
+        self.collect_references(project_id);
         Ok(updated)
     }
 
-    fn collect_pins(&self, project_id: i64) {
+    pub async fn restyle(&self, project_id: i64) -> Result<Project, StudioError> {
+        let context = self.store.reference_context(project_id)?;
+        let earlier: Vec<Project> = self
+            .store
+            .list_projects()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|project| project.id != project_id)
+            .collect();
+        let brief = prompts::StyleBrief {
+            prompt: &context.prompt,
+            game_name: &context.game_name,
+            pitch: &context.pitch,
+            design_document: &context.design_document,
+            style: &context.style,
+            board: &context.references,
+        };
+        let answer = self
+            .ask(Completion {
+                system: prompts::system_prompt(&[]),
+                user: prompts::restyle_message(&brief, &earlier),
+                effort: Effort::High,
+                schema: Some(prompts::style_schema()),
+            })
+            .await?;
+        let style = prompts::parse_style(&answer)?;
+        self.store.restyle(project_id, &style)
+    }
+
+    fn hunt_assets(&self, project_id: i64) {
+        if let Some(hunter) = self.app.try_state::<Arc<Hunter>>() {
+            hunter.follow_plan(project_id);
+        }
+    }
+
+    fn collect_references(&self, project_id: i64) {
         if let Some(pinterest) = self.app.try_state::<Arc<Pinterest>>() {
             let _ = pinterest.load_board(Arc::clone(&self.store), project_id, Refresh::Everything);
+        }
+        if let Some(artstation) = self.app.try_state::<Arc<ArtStation>>() {
+            let _ = artstation.load_board(Arc::clone(&self.store), project_id, Scope::Everything);
         }
     }
 
@@ -304,13 +356,21 @@ impl Studio {
         Ok(self
             .enabled_skills()?
             .into_iter()
-            .filter(|skill| runs_as_deliverable(&skill.name))
+            .filter(|skill| runs_as_deliverable(&skill.name) && !guides_the_agent(skill.stage))
             .map(|skill| SkillRef {
                 name: skill.name,
                 title: skill.title,
                 stage: skill.stage,
             })
             .collect())
+    }
+
+    pub fn agent_skills(&self) -> Vec<Skill> {
+        self.enabled_skills()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|skill| runs_as_deliverable(&skill.name) && guides_the_agent(skill.stage))
+            .collect()
     }
 
     pub fn enabled_skill(&self, name: &str) -> Option<Skill> {

@@ -117,6 +117,10 @@ impl Pinterest {
         }
     }
 
+    pub fn is_loading(&self, project_id: i64) -> bool {
+        self.boards().loading.contains(&project_id)
+    }
+
     pub fn open_login(&self) -> Result<(), PinterestError> {
         if let Some(window) = self.app.get_webview_window(LOGIN_WINDOW) {
             let _ = window.unminimize();
@@ -354,6 +358,7 @@ mod tests {
                 .iter()
                 .map(|(id, image)| Pin::checked(id, image, "").unwrap())
                 .collect(),
+            artworks: Vec::new(),
         }
     }
 

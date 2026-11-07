@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter};
 use crate::claude_code::{Completion, Effort};
 use crate::comfy::{ComfyClient, Install, Inventory, OutputRef, Progress, ServerInfo, locate_install};
 use crate::comfy_prompts::{self, ProjectStyle};
-use crate::comfy_recipes::{self, Aspect, Brief, Candidate};
+use crate::comfy_recipes::{self, Aspect, Brief, Candidate, Recipe};
 use crate::comfy_store::{ComfyStore, NewRun, NewTask, Plan, StoredFile, StoredRun, StoredTask, WritingJob};
 use crate::studio::Studio;
 
@@ -466,6 +466,7 @@ impl Forge {
             .filter(|run| run.reference && run.status == RunStatus::Done)
             .find_map(|run| run.files.first())
             .map(|file| file.source.annotated());
+        let mut mesh = shaped_mesh(&task.runs, &watch.roster);
         for run in task.runs.iter().filter(|run| run.status == RunStatus::Queued) {
             if !self.store.exists(task.id).unwrap_or(true) {
                 return Flow::Deleted;
@@ -489,6 +490,14 @@ impl Forge {
                 let _ = self
                     .store
                     .skip_run(run.id, "Немає референсу — картинка для 3D не згенерувалась.");
+                self.notify();
+                continue;
+            }
+            if recipe.needs_mesh() && mesh.is_none() {
+                let _ = self.store.skip_run(
+                    run.id,
+                    "Немає мешу — UltraTex перетекстурює меш від TRELLIS.2 чи Pixal3D, а вони не відпрацювали.",
+                );
                 self.notify();
                 continue;
             }
@@ -517,6 +526,7 @@ impl Forge {
                 prefix: &prefix,
                 matting: watch.matting.as_deref(),
                 reference: reference.as_deref(),
+                mesh: mesh.as_deref(),
             };
             let graph = comfy_recipes::graph(recipe, &brief);
             match self.execute(task.id, &graph) {
@@ -526,6 +536,8 @@ impl Forge {
                         Ok(files) if !files.is_empty() => {
                             if run.reference {
                                 reference = files.first().map(|file| file.source.annotated());
+                            } else if mesh.is_none() && !recipe.needs_mesh() {
+                                mesh = first_mesh(&files);
                             }
                             let _ = self.store.finish_run(run.id, &files);
                         }
@@ -661,6 +673,28 @@ fn plan_runs(roster: &[Candidate], disabled: &HashSet<String>, kind: AssetKind) 
         }
         medium => usable(medium).map(|candidate| entry(candidate, false)).collect(),
     }
+}
+
+fn shaped_mesh(runs: &[StoredRun], roster: &[Candidate]) -> Option<String> {
+    runs.iter()
+        .filter(|run| run.status == RunStatus::Done && shapes_mesh(run, roster))
+        .find_map(|run| first_mesh(&run.files))
+}
+
+fn shapes_mesh(run: &StoredRun, roster: &[Candidate]) -> bool {
+    !run.reference
+        && !roster
+            .iter()
+            .find(|candidate| candidate.id == run.model_id)
+            .and_then(|candidate| candidate.recipe.as_ref())
+            .is_some_and(Recipe::needs_mesh)
+}
+
+fn first_mesh(files: &[StoredFile]) -> Option<String> {
+    files
+        .iter()
+        .find(|file| file.medium == Medium::Mesh)
+        .map(|file| file.source.relative())
 }
 
 fn models_of(roster: &[Candidate], disabled: &HashSet<String>) -> Vec<ComfyModel> {
@@ -866,7 +900,53 @@ mod tests {
             prefix,
             matting,
             reference,
+            mesh: None,
         }
+    }
+
+    fn finished(id: i64, model_id: &str, reference: bool, filename: &str) -> StoredRun {
+        let source = OutputRef {
+            filename: filename.into(),
+            subfolder: "noctics/4".into(),
+        };
+        StoredRun {
+            id,
+            task_id: 4,
+            model_id: model_id.into(),
+            model_name: model_id.into(),
+            reference,
+            status: RunStatus::Done,
+            files: vec![StoredFile {
+                name: format!("{id}-0.{}", source.extension()),
+                medium: medium_of(&source.extension()).unwrap(),
+                source,
+            }],
+            error: None,
+            started_at: None,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn ultratex_paints_the_first_generated_mesh() {
+        let mut ultratex = candidate("ultratex:lora", Medium::Mesh, true);
+        ultratex.recipe = Some(Recipe::UltraTex {
+            unet: "klein.safetensors".into(),
+            clip: "qwen.safetensors".into(),
+            vae: "vae.safetensors".into(),
+            lora: "lora.safetensors".into(),
+            decoder: "decoder.pt".into(),
+            matting: "birefnet.safetensors".into(),
+        });
+        let roster = vec![candidate("trellis", Medium::Mesh, true), ultratex];
+        let reference = finished(1, "zimage", true, "ref_00001_.png");
+        let painted = finished(2, "ultratex:lora", false, "painted_00001_.glb");
+        let shaped = finished(3, "trellis", false, "shape_00001_.glb");
+        assert_eq!(shaped_mesh(&[reference.clone(), painted.clone()], &roster), None);
+        assert_eq!(
+            shaped_mesh(&[reference, painted, shaped], &roster),
+            Some("noctics/4/shape_00001_.glb".to_owned())
+        );
     }
 
     #[test]

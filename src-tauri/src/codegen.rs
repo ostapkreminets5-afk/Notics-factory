@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use noctics_shared::{CLAUDE_MODEL, GameEngine, OutputStatus, ProjectDetail, StudioError};
+use noctics_shared::{CLAUDE_MODEL, GameEngine, OutputStatus, ProjectDetail, Skill, StudioError, engine_takes_motions};
 use serde_json::Value;
 
 use crate::claude_code;
@@ -15,7 +15,11 @@ const CODE_TOOLS: &str = "Read,Write,Edit,Glob,Grep,Bash";
 const FALLBACK_UNITY: &str = "2022.3 LTS";
 const FALLBACK_UNREAL: &str = "5.4";
 pub const ART_GUIDE: &str = "art.md";
+pub const FOUND_ASSETS: &str = "found-assets.md";
+pub const BUILD_SKILLS: &str = "build-skills";
 const ART_PROMPTS: &str = "art/prompts.md";
+const MOTION_WISHLIST: &str = "animations.md";
+const ASSET_CREDITS: &str = "CREDITS.md";
 
 pub struct Assignment<'a> {
     pub engine: GameEngine,
@@ -27,6 +31,8 @@ pub struct Assignment<'a> {
     pub project_id: i64,
     pub art_api: Option<&'a str>,
     pub art_guide: bool,
+    pub motion_api: Option<&'a str>,
+    pub build_skills: bool,
 }
 
 pub enum Event {
@@ -50,15 +56,16 @@ pub fn write_brief(dir: &Path, detail: &ProjectDetail, art_guide: Option<&str>) 
         .join("\n");
     let design = format!(
         "# {}\n\n{}\n\n## Промпт гравця\n\n{}\n\n## Бриф\n\n{}\n\n## Стиль інтерфейсу\n\n\
-- Палітра: {}\n- Шрифти: {}\n- Радіус кутів: {} px\n- Настрій: {}\n\n## Екрани\n\n{}\n",
+- Палітра: {}\n- Шрифти: {}\n- Радіус кутів: {} px\n- Настрій: {}\n- Вигляд світу: {}\n\n## Екрани\n\n{}\n",
         project.name,
         project.pitch,
         project.prompt,
         detail.design_document,
-        style.palette.join(", "),
+        style.palette_lines(),
         style.fonts,
         style.corner_radius,
         style.mood,
+        style.look,
         screens
     );
     recipes::write_file(&dir.join("design.md"), design.as_bytes())?;
@@ -136,8 +143,8 @@ pub fn system_prompt(assignment: &Assignment<'_>) -> String {
 - Поточна папка — корінь проєкту гри. Створюй і змінюй файли лише в ній.\n\
 - Матеріали студії лежать у {}: design.md (бриф, стиль, екрани), skills/ (дизайн-документ, лор, специфікації й скрипти від навичок студії), \
 screens/ (затверджені макети інтерфейсу 1280×720 у HTML), references.md (референси). Прочитай їх перед роботою.\n\
-- Інтерфейс гри повторює макети зі screens/: палітра, шрифти, розкладка й тексти.\n\
-{}\n\
+{}- Інтерфейс гри повторює макети зі screens/: палітра, шрифти, розкладка й тексти.\n\
+{}{}\n\
 - Гра повна й прохідна: головне меню, основний цикл з дизайн-документа, перемога й поразка, пауза, налаштування гучності.\n\
 - Керування: клавіатура й миша, геймпад і сенсорне керування на телефоні.\n\
 - Гра працює офлайн: жодних мережевих запитів, CDN чи зовнішніх ассетів під час гри.\n\
@@ -149,9 +156,83 @@ screens/ (затверджені макети інтерфейсу 1280×720 у 
         engine.stack(),
         engine_contract(engine, assignment.tools),
         assignment.brief.display(),
+        build_skill_rules(assignment),
         art_rules(assignment),
+        motion_rules(assignment),
         verification(engine, assignment.tools),
     )
+}
+
+fn build_skill_rules(assignment: &Assignment<'_>) -> String {
+    if !assignment.build_skills {
+        return String::new();
+    }
+    format!(
+        "- Навички етапу «06 Збірка» лежать у {}: це правила саме для тебе. \
+Виконай кожну прямо в коді й файлах гри — скрипти механік, ефекти, шейдери, — а не окремим документом.\n",
+        assignment.brief.join(BUILD_SKILLS).display()
+    )
+}
+
+pub fn write_build_skills(dir: &Path, skills: &[Skill]) -> Result<(), String> {
+    for (index, skill) in skills.iter().enumerate() {
+        let file = dir
+            .join(BUILD_SKILLS)
+            .join(format!("{:02}-{}.md", index + 1, recipes::slugify(&skill.name)));
+        recipes::write_file(&file, skill.to_skill_markdown().as_bytes())?;
+    }
+    Ok(())
+}
+
+fn motion_rules(assignment: &Assignment<'_>) -> String {
+    let engine = assignment.engine;
+    if !engine_takes_motions(engine) {
+        return String::new();
+    }
+    let Some(base) = assignment.motion_api else {
+        return format!(
+            "\n- Mixamo не підключено, тож готових анімацій скелета немає. Якщо в грі є 3D-персонажі, запиши в {MOTION_WISHLIST} \
+список потрібних анімацій англійською (idle, walk, run…) і анімуй їх кодом через кістки чи твіни, без заглушок."
+        );
+    };
+    let project = assignment.project_id;
+    format!(
+        "\n- Анімації 3D-персонажів з людським скелетом бери з Mixamo через Mixamo API Noctics {base}, поки пишеш код. \
+Спершу GET {base}/plan?project_id={project} — Noctics розбере дизайн-документ і поставить у чергу набір під жанр (idle, walk, run, jump, hit, death і, наприклад, удари мечем чи стрільбу). \
+Кожну іншу анімацію замов GET {base}/order?name=<коротка-латинська-назва>&q=<що шукати англійською>&project_id={project}&in_place=1. \
+in_place=1 — для ходьби, бігу й стрейфу, бо персонажа рухає код; без in_place — для стрибків, перекатів і атак із зсувом; mirror=1 — дзеркальна копія; trim=10-90 — обрізати кліп у відсотках; fps=30 або 60. \
+Щоб вибрати точніше, подивись GET {base}/search?q=<запит> і передай id найкращої в /order. \
+Стеж GET {base}/animations/<id>, доки status не стане done або failed; поле file — шлях до FBX на диску: скопіюй його командою cp в ассети гри як <name>.fbx. \
+Повтор того самого /order не створює дубль, тож перевіряти можна сміливо.\n\
+- Усі кліпи запечені на одному скелеті Mixamo, тож вони змішуються на одній моделі. Допрацюй кожен: цикл для idle, walk і run, \
+плавні переходи й блендинг у стейт-машині анімацій, швидкість програвання під реальну швидкість руху, вимкнений кореневий рух для in-place кліпів, \
+події кроків і влучань на потрібних кадрах. Якщо модель персонажа без скелета, замов skin=1 для idle — цей FBX стане моделлю, а решта кліпів іде без скіну.\n\
+- {}",
+        motion_import(engine)
+    )
+}
+
+fn motion_import(engine: GameEngine) -> &'static str {
+    match engine {
+        GameEngine::Godot => {
+            "Godot 4 сам імпортує FBX: клади кліпи в assets/animations/, у сцені персонажа зв’яжи AnimationPlayer з AnimationTree (BlendSpace для ходьби й бігу), \
+цикли вмикай через Animation.loop_mode."
+        }
+        GameEngine::Unity => {
+            "Unity: FBX у Assets/Resources/Animations, кліпи бери Resources.LoadAll<AnimationClip>, а змішуй через Playables API (AnimationMixerPlayable), \
+бо Animator Controller кодом не створити."
+        }
+        GameEngine::Unreal => {
+            "Unreal імпортує FBX лише в редакторі: поклади кліпи в Content/Animations/Source і опиши імпорт у animations.md, а рух персонажа в C++ не роби залежним від них."
+        }
+        GameEngine::ThreeJs => {
+            "Three.js: FBX у public/animations, вантаж FBXLoader з three/examples/jsm/loaders/FBXLoader.js, програвай через AnimationMixer і crossFadeTo між діями."
+        }
+        _ => {
+            "Цей рушій читає glTF, а не FBX: якщо blender є в PATH, конвертуй кожен FBX у GLB через blender -b --python-expr \
+з bpy.ops.import_scene.fbx і bpy.ops.export_scene.gltf; без Blender залиш FBX в assets/animations і анімуй кістки кодом."
+        }
+    }
 }
 
 fn art_rules(assignment: &Assignment<'_>) -> String {
@@ -182,7 +263,21 @@ kind — concept, sprite, texture, effect, interface, model, music або sound.
         "- Персонажі, істоти, предмети, локації й ілюстрації — лише справжній арт у PNG або GLB, ніколи не фігури з коду, SVG, \
 _draw, Polygon2D, CSG, PIL чи примітивів. Кодом і примітивами — лише рамки інтерфейсу, ефекти, геометрія рівня й колізії.{guide}\n\
 - У макетах screens/ стоять слоти <figure class=\"art-slot\" data-art=\"шлях\" data-prompt=\"промпт\">: \
-кожен такий арт має лягти в гру за шляхом data-art, згенерований з промпту data-prompt.\n{source}"
+кожен такий арт має лягти в гру за шляхом data-art, згенерований з промпту data-prompt.\n{source}{}",
+        found_asset_rules(assignment.brief)
+    )
+}
+
+fn found_asset_rules(brief: &Path) -> String {
+    if !brief.join(FOUND_ASSETS).is_file() {
+        return String::new();
+    }
+    format!(
+        "\n- У {FOUND_ASSETS} поруч із design.md — готові ассети, які AI-ядро знайшло в інтернеті (itch.io, OpenGameArt, Kenney тощо), \
+з ліцензіями й цінами. Безкоштовні з ліцензією, що дозволяє використання в іграх, можна завантажити в ассети гри, \
+якщо файл віддається за прямим посиланням без входу; перевір вміст архіву й переглянь картинки через Read. \
+Автора, сторінку й ліцензію кожного такого ассета запиши в {ASSET_CREDITS} у корені гри. \
+Платні ассети й ті, що вимагають входу, — лише орієнтир стилю: їх не завантажуй, а генеруй схожий арт."
     )
 }
 
@@ -490,8 +585,19 @@ mod tests {
             project_id: 7,
             art_api: Some("http://127.0.0.1:47822"),
             art_guide: true,
+            motion_api: Some("http://127.0.0.1:47834"),
+            build_skills: true,
         };
         let system = system_prompt(&assignment);
+        assert!(system.contains("Навички етапу «06 Збірка» лежать у"));
+        assert!(system.contains(BUILD_SKILLS));
+        assert!(
+            !system_prompt(&Assignment {
+                build_skills: false,
+                ..assignment
+            })
+            .contains(BUILD_SKILLS)
+        );
         assert!(system.contains("Рушій: Phaser (JavaScript · 2D)."));
         assert!(system.contains("base: './'"));
         assert!(system.contains("Жодних коментарів у коді"));
@@ -524,5 +630,57 @@ mod tests {
         let args = arguments(brief, "system");
         assert_eq!(args.last().unwrap(), "system");
         assert!(args.iter().any(|arg| arg == "stream-json"));
+    }
+
+    #[test]
+    fn tells_claude_where_to_take_character_animations() {
+        let names = GameNames::new("Нічний злодій");
+        let tools = Toolchains::default();
+        let assignment = Assignment {
+            engine: GameEngine::Godot,
+            names: &names,
+            brief: Path::new("brief"),
+            tools: &tools,
+            request: None,
+            fresh: true,
+            project_id: 7,
+            art_api: None,
+            art_guide: false,
+            motion_api: Some("http://127.0.0.1:47834"),
+            build_skills: false,
+        };
+        let system = system_prompt(&assignment);
+        assert!(system.contains("GET http://127.0.0.1:47834/plan?project_id=7"));
+        assert!(system.contains("/order?name="));
+        assert!(system.contains("AnimationTree"));
+        let offline = system_prompt(&Assignment {
+            motion_api: None,
+            ..assignment
+        });
+        assert!(offline.contains(MOTION_WISHLIST) && !offline.contains("/order?"));
+        let flat = system_prompt(&Assignment {
+            engine: GameEngine::Phaser,
+            ..assignment
+        });
+        assert!(!flat.contains("Mixamo"));
+    }
+
+    #[test]
+    fn hands_build_stage_skills_to_the_agent_as_files() {
+        let dir = std::env::temp_dir().join(format!("noctics-build-skills-{}", std::process::id()));
+        let skill = Skill {
+            id: 1,
+            name: "game-scripts".into(),
+            stage: noctics_shared::BUILD_STAGE,
+            title: "Скрипти гри".into(),
+            summary: "Пише скрипти механік".into(),
+            category: noctics_shared::SkillCategory::Code,
+            instructions: "Кожна механіка — свій модуль.".into(),
+            enabled: true,
+        };
+        write_build_skills(&dir, &[skill]).unwrap();
+        let written = std::fs::read_to_string(dir.join(BUILD_SKILLS).join("01-game-scripts.md")).unwrap();
+        assert!(written.contains("Кожна механіка — свій модуль."));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

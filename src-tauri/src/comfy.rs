@@ -33,10 +33,12 @@ pub enum Folder {
     ClipVision,
     BackgroundRemoval,
     Geometry,
+    Loras,
+    UltraTex,
 }
 
 impl Folder {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 9] = [
         Self::Checkpoints,
         Self::DiffusionModels,
         Self::TextEncoders,
@@ -44,6 +46,8 @@ impl Folder {
         Self::ClipVision,
         Self::BackgroundRemoval,
         Self::Geometry,
+        Self::Loras,
+        Self::UltraTex,
     ];
 
     fn loader(self) -> (&'static str, &'static str) {
@@ -55,6 +59,8 @@ impl Folder {
             Self::ClipVision => ("CLIPVisionLoader", "clip_name"),
             Self::BackgroundRemoval => ("LoadBackgroundRemovalModel", "bg_removal_name"),
             Self::Geometry => ("LoadMoGeModel", "model_name"),
+            Self::Loras => ("LoraLoaderModelOnly", "lora_name"),
+            Self::UltraTex => ("UltraTexForegroundDecoder", "decoder_name"),
         }
     }
 
@@ -67,6 +73,8 @@ impl Folder {
             Self::ClipVision => &["clip_vision"],
             Self::BackgroundRemoval => &["background_removal"],
             Self::Geometry => &["geometry_estimation"],
+            Self::Loras => &["loras"],
+            Self::UltraTex => &["ultratex"],
         }
     }
 }
@@ -102,10 +110,14 @@ pub struct OutputRef {
 
 impl OutputRef {
     pub fn annotated(&self) -> String {
+        format!("{} [output]", self.relative())
+    }
+
+    pub fn relative(&self) -> String {
         if self.subfolder.is_empty() {
-            format!("{} [output]", self.filename)
+            self.filename.clone()
         } else {
-            format!("{}/{} [output]", self.subfolder, self.filename)
+            format!("{}/{}", self.subfolder, self.filename)
         }
     }
 
@@ -638,6 +650,7 @@ mod tests {
     fn annotates_output_paths() {
         let nested = OutputRef { filename: "ref_00001_.png".into(), subfolder: "noctics/7".into() };
         assert_eq!(nested.annotated(), "noctics/7/ref_00001_.png [output]");
+        assert_eq!(nested.relative(), "noctics/7/ref_00001_.png");
         assert_eq!(nested.extension(), "png");
         let flat = OutputRef { filename: "a.PNG".into(), subfolder: String::new() };
         assert_eq!(flat.annotated(), "a.PNG [output]");

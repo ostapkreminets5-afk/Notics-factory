@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{GameEngine, StudioError};
+use crate::{GameEngine, PlaytestOverview, StudioError};
 
 pub const MAX_BUILD_REQUEST_CHARS: usize = 2000;
 pub const MAX_SOURCE_PATH_CHARS: usize = 400;
@@ -241,6 +241,8 @@ pub struct BuildOverview {
     pub output_dir: String,
     #[serde(default)]
     pub planned: Vec<BuildTarget>,
+    #[serde(default)]
+    pub playtest: PlaytestOverview,
 }
 
 impl BuildOverview {
@@ -252,9 +254,11 @@ impl BuildOverview {
     }
 
     pub fn can_build(&self) -> bool {
-        self.source
-            .as_ref()
-            .is_some_and(|source| source.valid && source.status != SourceStatus::Generating)
+        !self.playtest.is_active()
+            && self
+                .source
+                .as_ref()
+                .is_some_and(|source| source.valid && source.status != SourceStatus::Generating)
     }
 }
 
@@ -266,6 +270,8 @@ pub enum BuildError {
     NoSource,
     SourceBusy,
     SourceInvalid,
+    PlaytestBusy,
+    PlaytestUnavailable(String),
     PathInvalid,
     RequestTooLong,
     NothingSelected,
@@ -283,6 +289,8 @@ impl fmt::Display for BuildError {
             Self::NoSource => f.write_str("the project has no game source yet"),
             Self::SourceBusy => f.write_str("the game source is being generated"),
             Self::SourceInvalid => f.write_str("the folder is not a project of the chosen engine"),
+            Self::PlaytestBusy => f.write_str("a playtest is running for this game"),
+            Self::PlaytestUnavailable(reason) => write!(f, "playtest is unavailable: {reason}"),
             Self::PathInvalid => f.write_str("the folder does not exist"),
             Self::RequestTooLong => {
                 write!(f, "request is longer than {MAX_BUILD_REQUEST_CHARS} characters")

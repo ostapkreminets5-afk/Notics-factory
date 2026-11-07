@@ -8,6 +8,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
+use crate::asset_hunt::Hunter;
 use crate::builder::Builder;
 use crate::commands::{ActiveSession, off_main_thread};
 use crate::skills::SkillStore;
@@ -237,10 +238,13 @@ pub async fn rename_project(
 pub async fn delete_project(
     id: i64,
     studio: Studios<'_>,
+    hunter: State<'_, Arc<Hunter>>,
     session: State<'_, ActiveSession>,
 ) -> Result<(), StudioError> {
     guard(&session)?;
     on_store(&studio, move |studio| studio.store.delete_project(id)).await?;
+    let hunter = Arc::clone(&hunter);
+    let _ = off_main_thread(move || hunter.forget(id), StudioError::Storage).await;
     studio.notify();
     Ok(())
 }
@@ -253,12 +257,14 @@ pub async fn sync_project(
 ) -> Result<ProjectDetail, StudioError> {
     guard(&session)?;
     let detail = on_store(&studio, move |studio| {
+        studio.store.retire_agent_outputs(id)?;
         studio.store.ensure_outputs(id, &studio.deliverable_skills()?)?;
         studio.store.retry_failed(id)
     })
     .await?;
     studio.notify();
     studio.kick();
+    studio.advance(id);
     Ok(detail)
 }
 
@@ -273,6 +279,20 @@ pub async fn pick_references(
     let updated = studio.pick_references(id).await?;
     studio.notify();
     Ok(updated)
+}
+
+#[tauri::command]
+pub async fn restyle_project(
+    id: i64,
+    studio: Studios<'_>,
+    session: State<'_, ActiveSession>,
+) -> Result<Project, StudioError> {
+    guard(&session)?;
+    on_store(&studio, |studio| studio.require_connection()).await?;
+    let restyled = studio.restyle(id).await?;
+    studio.notify();
+    studio.kick();
+    Ok(restyled)
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use js_sys::Date;
 use noctics_shared::{
-    JournalEntry, JournalEvent, JournalSource, JournalTone, LAST_STAGE, format_size,
+    JournalEntry, JournalEvent, JournalSource, JournalTone, LAST_STAGE, PlaytestVerdict, format_size,
 };
 use wasm_bindgen::JsValue;
 
@@ -99,6 +99,7 @@ struct Line {
     source: JournalSource,
     tone: JournalTone,
     stage: Option<u8>,
+    finds: bool,
     text: String,
     detail: Option<String>,
     day: Day,
@@ -125,6 +126,10 @@ impl Line {
             source,
             tone: entry.event.tone(),
             stage: entry.event.stage(),
+            finds: matches!(
+                entry.event,
+                JournalEvent::AssetsFound { .. } | JournalEvent::AssetHuntFailed { .. }
+            ),
             text,
             detail,
             day: Day::of(&moment),
@@ -312,6 +317,7 @@ pub fn JournalPage() -> Element {
                                         source: line.source,
                                         tone: line.tone,
                                         stage: line.stage,
+                                        finds: line.finds,
                                         text: line.text.clone(),
                                         detail: line.detail.clone(),
                                         clock: line.clock.clone(),
@@ -333,6 +339,7 @@ fn JournalRow(
     source: JournalSource,
     tone: JournalTone,
     stage: Option<u8>,
+    finds: bool,
     text: String,
     detail: Option<String>,
     clock: String,
@@ -347,8 +354,8 @@ fn JournalRow(
             button {
                 class: "journal-row is-{tone.code()}",
                 r#type: "button",
-                title: "{destination(source, builds)}",
-                onclick: move |_| open_source(studio, source, builds, project_id),
+                title: "{destination(source, builds, finds)}",
+                onclick: move |_| open_source(studio, source, builds, finds, project_id),
                 time { class: "journal-time", title: "{stamp}", "{clock}" }
                 span { class: "journal-source is-{source.code()}",
                     span { class: "journal-source-dot" }
@@ -366,19 +373,21 @@ fn JournalRow(
     }
 }
 
-fn open_source(studio: Studio, source: JournalSource, builds: bool, project_id: i64) {
+fn open_source(studio: Studio, source: JournalSource, builds: bool, finds: bool, project_id: i64) {
     match source {
         JournalSource::Core if builds => studio.open(Section::Build),
         JournalSource::Core => studio.open(Section::Core),
+        JournalSource::References if finds => studio.open(Section::AssetHunt),
         JournalSource::References => studio.open(Section::Pinterest),
         JournalSource::Skills | JournalSource::Interface => studio.open_project(project_id),
     }
 }
 
-fn destination(source: JournalSource, builds: bool) -> &'static str {
+fn destination(source: JournalSource, builds: bool, finds: bool) -> &'static str {
     match source {
         JournalSource::Core if builds => "Відкрити збірку",
         JournalSource::Core => "Відкрити AI-ядро",
+        JournalSource::References if finds => "Відкрити «Пошук ассетів»",
         JournalSource::References => "Відкрити референси Pinterest",
         JournalSource::Skills | JournalSource::Interface => "Відкрити проєкт у Claude Design",
     }
@@ -445,6 +454,18 @@ fn describe(event: &JournalEvent) -> String {
         JournalEvent::PinsMissing => {
             "Pinterest не віддав жодного піна — перевір вхід у Pinterest".to_owned()
         }
+        JournalEvent::ArtworksImported { board, count } => format!(
+            "{} з ArtStation для референсу «{board}»",
+            plural(*count, ["робота", "роботи", "робіт"])
+        ),
+        JournalEvent::ArtworksMissing => {
+            "ArtStation не віддав жодної роботи — перевір інтернет".to_owned()
+        }
+        JournalEvent::AssetsFound { count } => format!(
+            "Claude знайшов в інтернеті {} для гри",
+            plural(*count, ["готовий ассет", "готові ассети", "готових ассетів"])
+        ),
+        JournalEvent::AssetHuntFailed { .. } => "Пошук готових ассетів не вдався".to_owned(),
         JournalEvent::ProjectFormed { name } => format!("Проєкт «{name}» сформовано"),
         JournalEvent::ProjectRenamed { name } => format!("Проєкт перейменовано на «{name}»"),
         JournalEvent::EngineChanged { engine } => format!("Рушій змінено на {}", engine.label()),
@@ -477,6 +498,22 @@ fn describe(event: &JournalEvent) -> String {
         JournalEvent::BuildSkipped { target, reason } => {
             format!("Білд {} пропущено: {reason}", target.label())
         }
+        JournalEvent::PlaytestStarted => "Плейтест: бот грає в гру й знімає екрани".to_owned(),
+        JournalEvent::PlaytestDone { verdict, fixed, open } => playtest_note(*verdict, *fixed, *open),
+        JournalEvent::PlaytestFailed { reason } => format!("Плейтест не вдався: {reason}"),
+        JournalEvent::PlaytestSkipped { reason } => format!("Плейтест пропущено: {reason}"),
+    }
+}
+
+fn playtest_note(verdict: PlaytestVerdict, fixed: u32, open: u32) -> String {
+    let repaired = plural(fixed, ["проблему", "проблеми", "проблем"]);
+    let left = plural(open, ["проблема", "проблеми", "проблем"]);
+    match verdict {
+        PlaytestVerdict::Passed => "Плейтест пройдено: гра запускається й грається".to_owned(),
+        PlaytestVerdict::Fixed if open == 0 => format!("Плейтест: виправлено {repaired}"),
+        PlaytestVerdict::Fixed => format!("Плейтест: виправлено {repaired}, лишилось {left}"),
+        PlaytestVerdict::NeedsWork if open == 0 => "Плейтест: гра ще потребує доробки — глянь звіт".to_owned(),
+        PlaytestVerdict::NeedsWork => format!("Плейтест: лишилось {left} — глянь звіт"),
     }
 }
 

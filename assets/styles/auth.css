@@ -23,6 +23,262 @@
   height: 100%;
 }
 
+.night-art {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 66% 42%;
+  transform-origin: 70% 60%;
+  animation: night-drift 48s ease-in-out infinite alternate;
+}
+
+.night-shade {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to top, rgba(6, 7, 11, 0.94) 0%, rgba(6, 7, 11, 0.62) 22%, rgba(6, 7, 11, 0) 50%),
+    linear-gradient(to bottom, rgba(6, 7, 11, 0.7) 0%, rgba(6, 7, 11, 0) 16%),
+    linear-gradient(to right, rgba(6, 7, 11, 0.5) 0%, rgba(6, 7, 11, 0) 42%);
+  pointer-events: none;
+}
+
+.sky {
+  position: absolute;
+  top: 12%;
+  left: 7%;
+  right: 9%;
+  height: 40%;
+  pointer-events: none;
+}
+
+.sky-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.sky-stars {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sky-line {
+  fill: none;
+  stroke: rgba(196, 212, 255, 0.24);
+  stroke-width: 1;
+  stroke-dasharray: 2 6;
+}
+
+.sky-trace {
+  fill: none;
+  stroke: rgba(150, 186, 255, 0.85);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  filter: drop-shadow(0 0 4px rgba(59, 123, 255, 0.9));
+  animation: sky-trace 12s var(--ease) infinite;
+  animation-delay: calc(var(--i) * 1.5s + 0.5s);
+}
+
+.star {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  width: 0;
+  height: 0;
+}
+
+.star-core {
+  position: absolute;
+  left: -3px;
+  top: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #eef3ff;
+  box-shadow:
+    0 0 6px 1px rgba(196, 214, 255, 0.85),
+    0 0 18px 4px rgba(59, 123, 255, 0.35);
+  opacity: 0.55;
+  animation: star-wake 12s var(--ease) infinite;
+  animation-delay: calc(var(--i) * 1.5s);
+}
+
+.star.is-final .star-core {
+  left: -5px;
+  top: -5px;
+  width: 10px;
+  height: 10px;
+  background: #fff4dc;
+  box-shadow:
+    0 0 8px 2px rgba(255, 214, 150, 0.9),
+    0 0 28px 8px rgba(255, 170, 72, 0.35);
+}
+
+.star-label {
+  position: absolute;
+  left: 14px;
+  top: 10px;
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 8px;
+  align-items: baseline;
+  padding: 7px 11px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(6, 7, 11, 0.5);
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+  opacity: 0.72;
+  animation: label-wake 12s var(--ease) infinite;
+  animation-delay: calc(var(--i) * 1.5s);
+}
+
+.star.is-left .star-label {
+  left: auto;
+  right: 14px;
+}
+
+.star.is-above .star-label {
+  top: auto;
+  bottom: 10px;
+}
+
+.star-code {
+  color: rgba(150, 186, 255, 0.95);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+
+.star.is-final .star-code {
+  color: #ffc98a;
+}
+
+.star-title {
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.star-note {
+  grid-column: 2;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+@keyframes night-drift {
+  from {
+    transform: scale(1.02);
+  }
+  to {
+    transform: scale(1.07) translate(-0.6%, -0.4%);
+  }
+}
+
+@keyframes star-wake {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  5% {
+    opacity: 1;
+    transform: scale(1.9);
+  }
+  12% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+  78% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+}
+
+@keyframes label-wake {
+  0% {
+    opacity: 0.72;
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+  6% {
+    opacity: 1;
+    border-color: rgba(150, 186, 255, 0.45);
+  }
+  20% {
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+  78% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.72;
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+}
+
+@keyframes sky-trace {
+  0% {
+    stroke-dashoffset: 1;
+    opacity: 1;
+  }
+  12% {
+    stroke-dashoffset: 0;
+  }
+  70% {
+    stroke-dashoffset: 0;
+    opacity: 0.9;
+  }
+  100% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+}
+
+@media (max-width: 1440px), (max-height: 860px) {
+  .star-note {
+    display: none;
+  }
+
+  .star-label {
+    padding: 5px 9px 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .night-art,
+  .star-core,
+  .star-label,
+  .sky-trace {
+    animation: none;
+  }
+
+  .star-core,
+  .star-label {
+    opacity: 1;
+  }
+
+  .sky-trace {
+    stroke-dashoffset: 0;
+    opacity: 0.6;
+  }
+}
+
 .showcase-top,
 .showcase-bottom {
   position: relative;

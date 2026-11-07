@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{BuildTarget, FIRST_STAGE, GameEngine, INTERFACE_STAGE, LAST_STAGE, StudioError};
+use crate::{BuildTarget, FIRST_STAGE, GameEngine, INTERFACE_STAGE, LAST_STAGE, PlaytestVerdict, StudioError};
 
 pub const JOURNAL_LIMIT: u32 = 500;
 const REFERENCE_STAGE: u8 = 2;
@@ -76,6 +76,10 @@ pub enum JournalEvent {
     BoardsPicked { count: u32 },
     PinsImported { board: String, count: u32 },
     PinsMissing,
+    ArtworksImported { board: String, count: u32 },
+    ArtworksMissing,
+    AssetsFound { count: u32 },
+    AssetHuntFailed { error: StudioError },
     ProjectFormed { name: String },
     ProjectRenamed { name: String },
     EngineChanged { engine: GameEngine },
@@ -88,6 +92,10 @@ pub enum JournalEvent {
     BuildFailed { target: BuildTarget, reason: String },
     BuildCancelled { target: BuildTarget },
     BuildSkipped { target: BuildTarget, reason: String },
+    PlaytestStarted,
+    PlaytestDone { verdict: PlaytestVerdict, fixed: u32, open: u32 },
+    PlaytestFailed { reason: String },
+    PlaytestSkipped { reason: String },
 }
 
 impl JournalEvent {
@@ -107,7 +115,11 @@ impl JournalEvent {
             | Self::BuildDone { .. }
             | Self::BuildFailed { .. }
             | Self::BuildCancelled { .. }
-            | Self::BuildSkipped { .. } => JournalSource::Core,
+            | Self::BuildSkipped { .. }
+            | Self::PlaytestStarted
+            | Self::PlaytestDone { .. }
+            | Self::PlaytestFailed { .. }
+            | Self::PlaytestSkipped { .. } => JournalSource::Core,
             Self::SkillsSynced { .. }
             | Self::SkillStarted { .. }
             | Self::SkillDone { .. }
@@ -120,9 +132,13 @@ impl JournalEvent {
             | Self::ScreenRefined { .. }
             | Self::ScreenRequeued { .. }
             | Self::ScreenApproved { .. } => JournalSource::Interface,
-            Self::BoardsPicked { .. } | Self::PinsImported { .. } | Self::PinsMissing => {
-                JournalSource::References
-            }
+            Self::BoardsPicked { .. }
+            | Self::PinsImported { .. }
+            | Self::PinsMissing
+            | Self::ArtworksImported { .. }
+            | Self::ArtworksMissing
+            | Self::AssetsFound { .. }
+            | Self::AssetHuntFailed { .. } => JournalSource::References,
         }
     }
 
@@ -131,22 +147,32 @@ impl JournalEvent {
             Self::SkillStarted { .. }
             | Self::ScreenStarted { .. }
             | Self::CodeStarted { .. }
-            | Self::BuildStarted { .. } => JournalTone::Working,
+            | Self::BuildStarted { .. }
+            | Self::PlaytestStarted => JournalTone::Working,
             Self::PlanReady { .. }
             | Self::SkillDone { .. }
             | Self::ScreenDone { .. }
             | Self::ScreenApproved { .. }
             | Self::BoardsPicked { .. }
             | Self::PinsImported { .. }
+            | Self::ArtworksImported { .. }
+            | Self::AssetsFound { .. }
             | Self::ProjectFormed { .. }
             | Self::CodeReady { .. }
             | Self::BuildDone { .. } => JournalTone::Done,
+            Self::PlaytestDone { verdict, .. } => match verdict {
+                PlaytestVerdict::NeedsWork => JournalTone::Failed,
+                PlaytestVerdict::Passed | PlaytestVerdict::Fixed => JournalTone::Done,
+            },
             Self::PlanFailed { .. }
             | Self::SkillFailed { .. }
             | Self::ScreenFailed { .. }
             | Self::PinsMissing
+            | Self::ArtworksMissing
+            | Self::AssetHuntFailed { .. }
             | Self::CodeFailed { .. }
-            | Self::BuildFailed { .. } => JournalTone::Failed,
+            | Self::BuildFailed { .. }
+            | Self::PlaytestFailed { .. } => JournalTone::Failed,
             Self::ProjectStarted { .. }
             | Self::SkillsSynced { .. }
             | Self::SkillRequeued { .. }
@@ -157,7 +183,8 @@ impl JournalEvent {
             | Self::EngineChanged { .. }
             | Self::RetryQueued { .. }
             | Self::BuildCancelled { .. }
-            | Self::BuildSkipped { .. } => JournalTone::Info,
+            | Self::BuildSkipped { .. }
+            | Self::PlaytestSkipped { .. } => JournalTone::Info,
         }
     }
 
@@ -177,9 +204,13 @@ impl JournalEvent {
             | Self::ScreenRefined { .. }
             | Self::ScreenRequeued { .. }
             | Self::ScreenApproved { .. } => Some(INTERFACE_STAGE),
-            Self::BoardsPicked { .. } | Self::PinsImported { .. } | Self::PinsMissing => {
-                Some(REFERENCE_STAGE)
-            }
+            Self::BoardsPicked { .. }
+            | Self::PinsImported { .. }
+            | Self::PinsMissing
+            | Self::ArtworksImported { .. }
+            | Self::ArtworksMissing
+            | Self::AssetsFound { .. }
+            | Self::AssetHuntFailed { .. } => Some(REFERENCE_STAGE),
             Self::CodeStarted { .. }
             | Self::CodeReady { .. }
             | Self::CodeFailed { .. }
@@ -187,7 +218,11 @@ impl JournalEvent {
             | Self::BuildDone { .. }
             | Self::BuildFailed { .. }
             | Self::BuildCancelled { .. }
-            | Self::BuildSkipped { .. } => Some(LAST_STAGE),
+            | Self::BuildSkipped { .. }
+            | Self::PlaytestStarted
+            | Self::PlaytestDone { .. }
+            | Self::PlaytestFailed { .. }
+            | Self::PlaytestSkipped { .. } => Some(LAST_STAGE),
             Self::SkillsSynced { .. }
             | Self::ProjectFormed { .. }
             | Self::ProjectRenamed { .. }
@@ -200,7 +235,8 @@ impl JournalEvent {
         match self {
             Self::PlanFailed { error }
             | Self::SkillFailed { error, .. }
-            | Self::ScreenFailed { error, .. } => Some(error),
+            | Self::ScreenFailed { error, .. }
+            | Self::AssetHuntFailed { error } => Some(error),
             _ => None,
         }
     }
@@ -270,6 +306,16 @@ mod tests {
         };
         assert_eq!(
             (build.source(), build.tone(), build.stage()),
+            (JournalSource::Core, JournalTone::Failed, Some(LAST_STAGE))
+        );
+
+        let playtest = JournalEvent::PlaytestDone {
+            verdict: PlaytestVerdict::NeedsWork,
+            fixed: 2,
+            open: 1,
+        };
+        assert_eq!(
+            (playtest.source(), playtest.tone(), playtest.stage()),
             (JournalSource::Core, JournalTone::Failed, Some(LAST_STAGE))
         );
 

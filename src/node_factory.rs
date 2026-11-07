@@ -2,16 +2,21 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use dioxus::prelude::*;
-use noctics_shared::{BuildOverview, PinterestStatus, Project, ProjectDetail, ProjectStatus};
+use noctics_shared::{BuildOverview, MotionStatus, PinterestStatus, Project, ProjectDetail, ProjectStatus, SourceStatus};
 
+use crate::asset_hunt::use_asset_hunt;
+use crate::build::explain_build;
 use crate::comfy::use_comfy;
 use crate::factory_mode::ModeSwitch;
-use crate::icons::{ChevronDownIcon, FolderIcon, LogoMark, PlusIcon};
+use crate::mixamo::{explain_mixamo, use_mixamo};
+use crate::icons::{ChevronDownIcon, FolderIcon, LogoMark, PlusIcon, RefreshIcon};
+use crate::inspector_layout::provide_inspector_layout;
 use crate::node_canvas::NodeCanvas;
-use crate::node_graph::{Draft, Node, NodeId, Phase, Snapshot, build_graph};
+use crate::node_graph::{Draft, Graph, Node, NodeId, Phase, Snapshot, build_graph};
 use crate::node_inspector::NodeInspector;
-use crate::studio::{project_status_label, use_studio};
-use crate::{bridge, build_bridge};
+use crate::open_design::use_open_design;
+use crate::studio::{explain, project_status_label, use_studio};
+use crate::{bridge, build_bridge, mixamo_bridge};
 
 const BUILDS_CHANGED: &str = "builds-changed";
 const TICK_MILLIS: i32 = 1000;
@@ -19,10 +24,19 @@ const MILLIS_PER_SECOND: f64 = 1000.0;
 const SECONDS_PER_MINUTE: i64 = 60;
 const SECONDS_PER_HOUR: i64 = 3600;
 
+#[derive(Clone, Copy, PartialEq)]
+enum Restart {
+    Studio,
+    Code,
+    Motions,
+}
+
 #[component]
 pub fn NodeFactory() -> Element {
     let studio = use_studio();
     let comfy = use_comfy();
+    let mixamo = use_mixamo();
+    provide_inspector_layout();
     let mut drafting = use_signal(|| false);
     let mut selected = use_signal(|| None::<NodeId>);
     let mut dismissed = use_signal(|| false);
@@ -32,6 +46,8 @@ pub fn NodeFactory() -> Element {
     let mut overview = use_signal(|| None::<BuildOverview>);
     let mut pinterest = use_signal(|| None::<PinterestStatus>);
     let mut builds_revision = use_signal(|| 0_u64);
+    let mut resuming = use_signal(|| false);
+    let mut resume_problem = use_signal(|| None::<(i64, String)>);
     let subscription = use_hook(|| Rc::new(RefCell::new(None::<bridge::Subscription>)));
 
     let focus = use_memo(move || {
@@ -85,6 +101,9 @@ pub fn NodeFactory() -> Element {
         }
     });
 
+    let hunt = use_asset_hunt(focus);
+    let open_design = use_open_design(focus);
+
     let focused = focus();
     let snapshot = Snapshot {
         detail: detail
@@ -97,6 +116,15 @@ pub fn NodeFactory() -> Element {
             .filter(|loaded| Some(loaded.project_id) == focused),
         comfy: comfy.overview.read().clone(),
         pinterest: pinterest.read().clone(),
+        hunt: hunt
+            .read()
+            .clone()
+            .filter(|loaded| Some(loaded.project_id) == focused),
+        mixamo: mixamo.overview.read().clone(),
+        open_design: open_design
+            .read()
+            .clone()
+            .filter(|loaded| Some(loaded.project_id) == focused),
     };
     let loading = focused.is_some() && snapshot.detail.is_none();
     let typed = draft_prompt.read().clone();
@@ -123,11 +151,49 @@ pub fn NodeFactory() -> Element {
         "Фабрика відпочиває: усе, що можна було зробити, зроблено"
     };
 
+    let code_broken = snapshot
+        .overview
+        .as_ref()
+        .and_then(|loaded| loaded.source.as_ref())
+        .is_some_and(|source| source.status == SourceStatus::Failed);
+    let stalled = stalled_nodes(&graph, code_broken);
+    let stalled_names = stalled
+        .iter()
+        .filter_map(|id| graph.node(*id))
+        .map(|node| format!("«{}»", node.title))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let problem = resume_problem()
+        .filter(|(project_id, _)| Some(*project_id) == focused)
+        .map(|(_, text)| text);
+
     let mut chosen = studio.selected;
     let mut start_new = move || {
         drafting.set(true);
         dismissed.set(false);
         selected.set(Some(NodeId::Prompt));
+    };
+    let mut resume = move |ids: Vec<NodeId>| {
+        let Some(project_id) = focused else {
+            return;
+        };
+        if *resuming.peek() {
+            return;
+        }
+        let part = |kind: Restart| ids.iter().any(|id| restart_of(*id) == Some(kind));
+        let parts = Parts {
+            studio: part(Restart::Studio),
+            code: part(Restart::Code),
+            motions: part(Restart::Motions),
+        };
+        resuming.set(true);
+        resume_problem.set(None);
+        spawn(async move {
+            let outcome = restart(project_id, parts).await;
+            studio.changed();
+            resume_problem.set(outcome.err().map(|text| (project_id, text)));
+            resuming.set(false);
+        });
     };
 
     rsx! {
@@ -147,14 +213,37 @@ pub fn NodeFactory() -> Element {
                     },
                     on_new: move |_| start_new(),
                 }
-                Ticker {
-                    live,
-                    note: idle_note,
-                    on_pick: move |id: NodeId| {
-                        dismissed.set(false);
-                        selected.set(Some(id));
-                        reveal += 1;
-                    },
+                div { class: "nf-status",
+                    Ticker {
+                        live,
+                        note: idle_note,
+                        on_pick: move |id: NodeId| {
+                            dismissed.set(false);
+                            selected.set(Some(id));
+                            reveal += 1;
+                        },
+                    }
+                    if !stalled.is_empty() {
+                        button {
+                            class: "nf-button is-primary nf-resume",
+                            r#type: "button",
+                            title: "Запустити знову з місця, де зупинились: {stalled_names}",
+                            disabled: resuming(),
+                            onclick: {
+                                let ids = stalled.clone();
+                                move |_| resume(ids.clone())
+                            },
+                            if resuming() {
+                                span { class: "nf-spinner" }
+                            } else {
+                                RefreshIcon {}
+                            }
+                            "Продовжити"
+                        }
+                    }
+                    if let Some(problem) = problem {
+                        span { class: "nf-resume-problem", role: "alert", title: "{problem}", "{problem}" }
+                    }
                 }
                 ModeSwitch {}
             }
@@ -165,10 +254,13 @@ pub fn NodeFactory() -> Element {
                     focus: live_id,
                     reveal: reveal(),
                     inspector_open: inspected.is_some(),
+                    stalled: stalled.clone(),
+                    resuming: resuming(),
                     on_select: move |id: Option<NodeId>| {
                         dismissed.set(id.is_none());
                         selected.set(id);
                     },
+                    on_resume: move |id: NodeId| resume(vec![id]),
                 }
                 if let Some(node) = inspected {
                     NodeInspector {
@@ -266,6 +358,71 @@ fn ProjectPicker(drafting: bool, on_pick: EventHandler<i64>, on_new: EventHandle
     }
 }
 
+#[derive(Clone, Copy)]
+struct Parts {
+    studio: bool,
+    code: bool,
+    motions: bool,
+}
+
+fn restart_of(id: NodeId) -> Option<Restart> {
+    match id {
+        NodeId::Plan | NodeId::Foundation | NodeId::Skills | NodeId::Screens => Some(Restart::Studio),
+        NodeId::Code => Some(Restart::Code),
+        NodeId::Animations => Some(Restart::Motions),
+        _ => None,
+    }
+}
+
+fn stalled_nodes(graph: &Graph, code_broken: bool) -> Vec<NodeId> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| node.phase == Phase::Failed)
+        .map(|node| node.id)
+        .filter(|id| match restart_of(*id) {
+            Some(Restart::Studio | Restart::Motions) => true,
+            Some(Restart::Code) => code_broken,
+            None => false,
+        })
+        .collect()
+}
+
+async fn restart(project_id: i64, parts: Parts) -> Result<(), String> {
+    if parts.studio {
+        bridge::sync_project(project_id)
+            .await
+            .map_err(|problem| explain(&problem))?;
+    }
+    if parts.code {
+        build_bridge::generate(project_id, None)
+            .await
+            .map_err(|problem| explain_build(&problem))?;
+    }
+    if parts.motions {
+        retry_failed_motions(project_id).await?;
+    }
+    Ok(())
+}
+
+async fn retry_failed_motions(project_id: i64) -> Result<(), String> {
+    let overview = mixamo_bridge::overview()
+        .await
+        .map_err(|problem| explain_mixamo(&problem))?;
+    let failed: Vec<i64> = overview
+        .for_project(project_id)
+        .into_iter()
+        .filter(|order| order.status == MotionStatus::Failed)
+        .map(|order| order.id)
+        .collect();
+    for id in failed {
+        mixamo_bridge::retry(id)
+            .await
+            .map_err(|problem| explain_mixamo(&problem))?;
+    }
+    Ok(())
+}
+
 fn project_phase(project: &Project) -> Phase {
     match project.status {
         ProjectStatus::Failed => Phase::Failed,
@@ -322,7 +479,7 @@ fn Clock(since: i64) -> Element {
     }
 }
 
-fn stopwatch(seconds: i64) -> String {
+pub(crate) fn stopwatch(seconds: i64) -> String {
     let seconds = seconds.max(0);
     let hours = seconds / SECONDS_PER_HOUR;
     let minutes = seconds % SECONDS_PER_HOUR / SECONDS_PER_MINUTE;
@@ -334,11 +491,11 @@ fn stopwatch(seconds: i64) -> String {
     }
 }
 
-fn now_seconds() -> i64 {
+pub(crate) fn now_seconds() -> i64 {
     (js_sys::Date::now() / MILLIS_PER_SECOND) as i64
 }
 
-async fn pause(millis: i32) {
+pub(crate) async fn pause(millis: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
         if let Some(window) = web_sys::window() {
             let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);

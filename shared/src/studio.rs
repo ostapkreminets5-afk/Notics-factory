@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::Pin;
+use crate::{Artwork, Pin};
 
 pub const CLAUDE_MODEL: &str = "claude-opus-5-5";
 pub const MAX_PROMPT_CHARS: usize = 4000;
@@ -22,8 +22,10 @@ pub const ART_SKILL: &str = "real-art-not-vector";
 pub const SCREEN_SKILLS: [&str; 2] = [INTERFACE_SKILL, ART_SKILL];
 pub const DESIGN_STAGE: u8 = 1;
 pub const INTERFACE_STAGE: u8 = 2;
-pub const MIN_REFERENCES: usize = 8;
-pub const MAX_REFERENCES: usize = 18;
+pub const BUILD_STAGE: u8 = 6;
+pub const CLAUDE_TIMEOUT: &str = "Claude Code did not answer in time";
+pub const MIN_REFERENCES: usize = 10;
+pub const MAX_REFERENCES: usize = 24;
 pub const REFERENCE_PALETTE_SIZE: usize = 3;
 pub const MAX_ANALYSIS_KEYWORDS: usize = 10;
 
@@ -216,9 +218,13 @@ impl GameEngine {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StyleGuide {
     pub palette: Vec<String>,
+    #[serde(default)]
+    pub palette_notes: Vec<String>,
     pub fonts: String,
     pub corner_radius: u8,
     pub mood: String,
+    #[serde(default)]
+    pub look: String,
 }
 
 impl StyleGuide {
@@ -228,6 +234,25 @@ impl StyleGuide {
             self.fonts, self.corner_radius, self.mood
         )
     }
+
+    pub fn palette_note(&self, index: usize) -> Option<&str> {
+        self.palette_notes
+            .get(index)
+            .map(|note| note.trim())
+            .filter(|note| !note.is_empty())
+    }
+
+    pub fn palette_lines(&self) -> String {
+        self.palette
+            .iter()
+            .enumerate()
+            .map(|(index, color)| match self.palette_note(index) {
+                Some(note) => format!("{color} ({note})"),
+                None => color.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -235,9 +260,13 @@ impl StyleGuide {
 pub enum ReferenceTopic {
     World,
     Characters,
+    #[serde(rename = "characters_3d")]
+    Characters3d,
     Light,
     Vfx,
+    VfxSprites,
     Interface,
+    MainMenu,
     Panels,
     Buttons,
     Icons,
@@ -249,12 +278,15 @@ pub enum ReferenceTopic {
 }
 
 impl ReferenceTopic {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 16] = [
         Self::World,
         Self::Characters,
+        Self::Characters3d,
         Self::Light,
         Self::Vfx,
+        Self::VfxSprites,
         Self::Interface,
+        Self::MainMenu,
         Self::Panels,
         Self::Buttons,
         Self::Icons,
@@ -265,13 +297,27 @@ impl ReferenceTopic {
         Self::Music,
     ];
 
+    pub const ALWAYS_SEARCHED: [Self; 8] = [
+        Self::Characters,
+        Self::Characters3d,
+        Self::Interface,
+        Self::MainMenu,
+        Self::Panels,
+        Self::Buttons,
+        Self::Vfx,
+        Self::VfxSprites,
+    ];
+
     pub fn code(self) -> &'static str {
         match self {
             Self::World => "world",
             Self::Characters => "characters",
+            Self::Characters3d => "characters_3d",
             Self::Light => "light",
             Self::Vfx => "vfx",
+            Self::VfxSprites => "vfx_sprites",
             Self::Interface => "interface",
+            Self::MainMenu => "main_menu",
             Self::Panels => "panels",
             Self::Buttons => "buttons",
             Self::Icons => "icons",
@@ -291,9 +337,12 @@ impl ReferenceTopic {
         match self {
             Self::World => "Світ",
             Self::Characters => "Персонажі",
+            Self::Characters3d => "Стиль 3D-персонажів",
             Self::Light => "Світло й настрій",
             Self::Vfx => "VFX і ефекти",
+            Self::VfxSprites => "VFX-спрайти й анімація",
             Self::Interface => "Інтерфейс і HUD",
+            Self::MainMenu => "Головні меню",
             Self::Panels => "Панелі й рамки",
             Self::Buttons => "Кнопки",
             Self::Icons => "Іконки",
@@ -319,6 +368,8 @@ pub struct Reference {
     pub palette: Vec<String>,
     #[serde(default)]
     pub pins: Vec<Pin>,
+    #[serde(default)]
+    pub artworks: Vec<Artwork>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +454,10 @@ pub struct ProjectDetail {
 
 pub fn runs_as_deliverable(skill_name: &str) -> bool {
     !SCREEN_SKILLS.contains(&skill_name)
+}
+
+pub fn guides_the_agent(stage: u8) -> bool {
+    stage >= BUILD_STAGE
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -564,10 +619,19 @@ mod tests {
         assert!(!runs_as_deliverable(INTERFACE_SKILL));
         assert!(!runs_as_deliverable(ART_SKILL));
         assert!(runs_as_deliverable("game-scripts"));
+        assert!(guides_the_agent(BUILD_STAGE));
+        assert!(!guides_the_agent(BUILD_STAGE - 1));
         assert_eq!(ScreenStatus::from_code("unknown"), None);
         for topic in ReferenceTopic::ALL {
             assert_eq!(ReferenceTopic::from_code(topic.code()), Some(topic));
+            let wire = serde_json::to_string(&topic).unwrap();
+            assert_eq!(wire, format!("\"{}\"", topic.code()));
         }
+        assert!(
+            ReferenceTopic::ALWAYS_SEARCHED
+                .iter()
+                .all(|topic| ReferenceTopic::ALL.contains(topic) && !topic.is_audio())
+        );
         let audio: Vec<ReferenceTopic> = ReferenceTopic::ALL
             .into_iter()
             .filter(|topic| topic.is_audio())
@@ -604,6 +668,22 @@ mod tests {
         assert!(!is_hex_color("3b7bff"));
         assert!(!is_hex_color("#3b7bfz"));
         assert!(!is_hex_color("#3b7b"));
+    }
+
+    #[test]
+    fn explains_where_each_color_comes_from() {
+        let style = StyleGuide {
+            palette: vec!["#1b1d26".into(), "#e0782e".into(), "#d6402a".into()],
+            palette_notes: vec!["фон — нічне небо".into(), "  ".into()],
+            ..StyleGuide::default()
+        };
+        assert_eq!(style.palette_note(0), Some("фон — нічне небо"));
+        assert_eq!(style.palette_note(1), None);
+        assert_eq!(style.palette_note(2), None);
+        assert_eq!(style.palette_lines(), "#1b1d26 (фон — нічне небо); #e0782e; #d6402a");
+        let stored: StyleGuide =
+            serde_json::from_str(r##"{"palette":["#000000"],"fonts":"A / B","corner_radius":4,"mood":"тиша"}"##).unwrap();
+        assert!(stored.palette_notes.is_empty() && stored.look.is_empty());
     }
 
     #[test]

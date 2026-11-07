@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use noctics_shared::{
-    DESIGN_STAGE, GameEngine, JOURNAL_LIMIT, JournalEntry, JournalEvent, MAX_PROJECT_NAME_CHARS,
+    Artwork, BUILD_STAGE, DESIGN_STAGE, GameEngine, JOURNAL_LIMIT, JournalEntry, JournalEvent, MAX_PROJECT_NAME_CHARS,
     MAX_SCREEN_TITLE_CHARS, OutputStatus, Pin, Project, ProjectDetail, ProjectStatus,
     PromptAnalysis, Reference, Screen, ScreenStatus, SkillOutput, StudioError, StyleGuide,
     validate_feedback,
@@ -536,6 +536,38 @@ impl StudioStore {
         query: &str,
         pins: &[Pin],
     ) -> Result<bool, StudioError> {
+        self.update_reference(project_id, index, query, |reference| {
+            reference.pins = pins.to_vec();
+            (!pins.is_empty()).then(|| JournalEvent::PinsImported {
+                board: reference.title.clone(),
+                count: count(pins.len()),
+            })
+        })
+    }
+
+    pub fn set_reference_artworks(
+        &self,
+        project_id: i64,
+        index: usize,
+        query: &str,
+        artworks: &[Artwork],
+    ) -> Result<bool, StudioError> {
+        self.update_reference(project_id, index, query, |reference| {
+            reference.artworks = artworks.to_vec();
+            (!artworks.is_empty()).then(|| JournalEvent::ArtworksImported {
+                board: reference.title.clone(),
+                count: count(artworks.len()),
+            })
+        })
+    }
+
+    fn update_reference(
+        &self,
+        project_id: i64,
+        index: usize,
+        query: &str,
+        change: impl FnOnce(&mut Reference) -> Option<JournalEvent>,
+    ) -> Result<bool, StudioError> {
         let connection = self.lock()?;
         let mut references = find_project(&connection, project_id)?.references;
         let Some(reference) = references
@@ -544,22 +576,15 @@ impl StudioStore {
         else {
             return Ok(false);
         };
-        reference.pins = pins.to_vec();
+        let event = change(reference);
         connection
             .execute(
                 "UPDATE projects SET moodboard = ?1 WHERE id = ?2",
                 params![encode_json(&references)?, project_id],
             )
             .map_err(storage)?;
-        if !pins.is_empty() {
-            record(
-                &connection,
-                project_id,
-                &JournalEvent::PinsImported {
-                    board: references[index].title.clone(),
-                    count: count(pins.len()),
-                },
-            )?;
+        if let Some(event) = event {
+            record(&connection, project_id, &event)?;
         }
         Ok(true)
     }
@@ -742,6 +767,40 @@ impl StudioStore {
         self.requeue(screen_id, None)
     }
 
+    pub fn restyle(&self, project_id: i64, style: &StyleGuide) -> Result<Project, StudioError> {
+        let connection = self.lock()?;
+        let project = find_project(&connection, project_id)?;
+        if project.status.is_planning() {
+            return Err(StudioError::StillPlanning);
+        }
+        let drawing: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM screens WHERE project_id = ?1 AND status = 'generating')",
+                params![project_id],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if drawing {
+            return Err(StudioError::ScreenBusy);
+        }
+        let transaction = connection.unchecked_transaction().map_err(storage)?;
+        let now = unix_now();
+        transaction
+            .execute(
+                "UPDATE projects SET style = ?1, updated_at = ?2 WHERE id = ?3",
+                params![encode_json(style)?, now, project_id],
+            )
+            .map_err(storage)?;
+        transaction
+            .execute(
+                "UPDATE screens SET status = 'queued', feedback = NULL, error = NULL, updated_at = ?1 WHERE project_id = ?2",
+                params![now, project_id],
+            )
+            .map_err(storage)?;
+        transaction.commit().map_err(storage)?;
+        find_project(&connection, project_id)
+    }
+
     fn requeue(&self, screen_id: i64, feedback: Option<&str>) -> Result<Screen, StudioError> {
         let connection = self.lock()?;
         let screen = find_screen(&connection, screen_id)?;
@@ -841,6 +900,15 @@ impl StudioStore {
             return Err(StudioError::NotFound);
         }
         Ok(())
+    }
+
+    pub fn retire_agent_outputs(&self, project_id: i64) -> Result<usize, StudioError> {
+        self.lock()?
+            .execute(
+                "DELETE FROM skill_outputs WHERE project_id = ?1 AND stage >= ?2 AND status != 'done'",
+                params![project_id, BUILD_STAGE],
+            )
+            .map_err(storage)
     }
 
     pub fn retry_failed(&self, project_id: i64) -> Result<ProjectDetail, StudioError> {
@@ -1226,6 +1294,7 @@ mod tests {
                 fonts: "Unbounded / Manrope".into(),
                 corner_radius: 12,
                 mood: "Неонова акварель".into(),
+                ..StyleGuide::default()
             },
             screens: ["Головне меню", "HUD", "Пауза"]
                 .into_iter()
@@ -1249,6 +1318,7 @@ mod tests {
                 query: "neon alley rain".into(),
                 palette: vec!["#0b0e1a".into()],
                 pins: Vec::new(),
+                artworks: Vec::new(),
             }],
         }
     }
@@ -1274,6 +1344,33 @@ mod tests {
             Some(Job::Screen(job)) => *job,
             _ => panic!("expected a screen job"),
         }
+    }
+
+    #[test]
+    fn restyling_redraws_every_screen_in_the_new_style() {
+        let store = in_memory();
+        let project_id = planned(&store);
+        let first = claim_screen(&store);
+        assert_eq!(
+            store.restyle(project_id, &StyleGuide::default()).unwrap_err(),
+            StudioError::ScreenBusy
+        );
+        store.finish_screen(first.screen_id, "<!DOCTYPE html><html></html>").unwrap();
+        store.approve_screen(first.screen_id).unwrap();
+        let fresh = StyleGuide {
+            palette: vec!["#1a1c2b".into()],
+            palette_notes: vec!["фон — сутінкове небо".into()],
+            look: "Паперові ліхтарі".into(),
+            ..StyleGuide::default()
+        };
+        let project = store.restyle(project_id, &fresh).unwrap();
+        assert_eq!(project.style, fresh);
+        let detail = store.detail(project_id).unwrap();
+        assert!(detail.screens.iter().all(|screen| screen.status == ScreenStatus::Queued));
+        let redrawn = claim_screen(&store);
+        assert_eq!(redrawn.style, fresh);
+        assert!(redrawn.reference.is_none());
+        assert!(redrawn.revision.is_none());
     }
 
     fn skill(name: &str, stage: u8) -> SkillRef {
@@ -1367,6 +1464,35 @@ mod tests {
         }
         assert!(store.ready_for_code(project_id).unwrap());
         assert!(!store.ready_for_code(project_id + 100).unwrap());
+    }
+
+    #[test]
+    fn stuck_build_stage_skills_stop_blocking_the_code_agent() {
+        let store = in_memory();
+        store.create_project(PROMPT, GameEngine::Godot).unwrap();
+        let Some(Job::Plan { project_id, .. }) = store.claim_job().unwrap() else {
+            panic!("expected a planning job");
+        };
+        store
+            .apply_plan(project_id, &plan(), &[skill("idea-to-gdd", 1), skill("game-scripts", BUILD_STAGE)])
+            .unwrap();
+        while let Some(job) = store.claim_job().unwrap() {
+            match job {
+                Job::Output(job) if job.skill_name == "game-scripts" => store
+                    .fail_output(job.output_id, &StudioError::Process("Claude Code did not answer in time".into()))
+                    .unwrap(),
+                Job::Output(job) => store.finish_output(job.output_id, "# GDD").unwrap(),
+                Job::Screen(job) => store.finish_screen(job.screen_id, "<html></html>").unwrap(),
+                Job::Plan { .. } => panic!("the plan is already applied"),
+            }
+        }
+        assert!(!store.ready_for_code(project_id).unwrap());
+        assert_eq!(store.retire_agent_outputs(project_id).unwrap(), 1);
+        assert!(store.ready_for_code(project_id).unwrap());
+        let detail = store.detail(project_id).unwrap();
+        assert_eq!(detail.outputs.len(), 1);
+        assert_eq!(detail.outputs[0].skill_name, "idea-to-gdd");
+        assert_eq!(store.retire_agent_outputs(project_id).unwrap(), 0);
     }
 
     #[test]
@@ -1521,7 +1647,28 @@ mod tests {
         assert!(!store.set_reference_pins(project_id, 0, "other board", pins).unwrap());
         assert!(!store.set_reference_pins(project_id, 3, "neon alley rain", pins).unwrap());
         let pinned = store.detail(project_id).unwrap().project;
-        assert_eq!(pinned.references[0].pins, [pin]);
+        assert_eq!(pinned.references[0].pins, pins);
+
+        let artwork = Artwork::checked(
+            "2B1Xae",
+            "https://cdna.artstation.com/p/assets/images/images/085/683/878/smaller_square/neon.jpg",
+            "Neon alley",
+            "Artist",
+        )
+        .unwrap();
+        let artworks = std::slice::from_ref(&artwork);
+        assert!(store.set_reference_artworks(project_id, 0, "neon alley rain", artworks).unwrap());
+        assert!(!store.set_reference_artworks(project_id, 0, "other board", artworks).unwrap());
+        let found = store.detail(project_id).unwrap().project;
+        assert_eq!(found.references[0].pins, pins);
+        assert_eq!(found.references[0].artworks, artworks);
+        assert_eq!(
+            store.journal(project_id).unwrap()[0].event,
+            JournalEvent::ArtworksImported {
+                board: "Неонові провулки".into(),
+                count: 1
+            }
+        );
 
         let replaced = store
             .set_reference_board(project_id, &PromptAnalysis::default(), &[])

@@ -275,25 +275,31 @@
   font-weight: 600;
 }
 
-.pinterest-api {
+.local-apis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.local-api {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 980px;
-  margin-top: 28px;
+  min-width: 0;
   padding: 16px 20px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface);
 }
 
-.pinterest-api-text {
+.local-api-text {
   color: var(--text-muted);
   font-size: 13px;
   line-height: 1.55;
 }
 
-.pinterest-api-address {
+.local-api-address {
   align-self: flex-start;
   max-width: 100%;
   padding: 8px 12px;
@@ -307,7 +313,7 @@
   user-select: all;
 }
 
-.pinterest-api-hint {
+.local-api-hint {
   color: var(--text-dim);
   font-family: var(--font-mono);
   font-size: 11px;
@@ -378,6 +384,50 @@
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.style-look {
+  color: #b3b8c4;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.style-palette-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.style-palette-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.style-palette-legend li {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.style-palette-dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+}
+
+.style-restyle {
+  align-self: flex-start;
 }
 
 .references-meta {
@@ -583,10 +633,22 @@
   margin-bottom: 14px;
 }
 
+.style-board-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
 .style-board-filters {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.style-board-filters.is-sources {
+  padding-right: 14px;
+  border-right: 1px solid var(--line);
 }
 
 .board-chip {
@@ -824,6 +886,11 @@
 .pin-viewer-title {
   font-size: 14px;
   line-height: 1.45;
+}
+
+.pin-viewer-author {
+  color: var(--text-muted);
+  font-size: 12.5px;
 }
 
 .pin-viewer-actions {

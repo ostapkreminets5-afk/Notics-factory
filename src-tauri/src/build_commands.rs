@@ -14,6 +14,7 @@ type Builders<'a> = State<'a, Arc<Builder>>;
 type Roots<'a> = State<'a, Arc<GamesRoot>>;
 
 const SOURCE_FOLDER: &str = "source";
+const PLAYTEST_FOLDER: &str = "playtest";
 const MAIN_WINDOW: &str = "main";
 const PICKER_TITLE: &str = "Папка, у якій Noctics створює ігри";
 
@@ -168,13 +169,38 @@ pub async fn open_game_folder(
     session: State<'_, ActiveSession>,
 ) -> Result<(), BuildError> {
     guard(&session)?;
-    let which = if folder == SOURCE_FOLDER {
-        Folder::Source
-    } else {
-        Folder::Builds
+    let which = match folder.as_str() {
+        SOURCE_FOLDER => Folder::Source,
+        PLAYTEST_FOLDER => Folder::Playtest,
+        _ => Folder::Builds,
     };
     let path = on_builder(&builder, move |builder| builder.folder(project_id, which)).await?;
     open(&app, path)
+}
+
+#[tauri::command]
+pub async fn start_playtest(
+    project_id: i64,
+    builder: Builders<'_>,
+    session: State<'_, ActiveSession>,
+) -> Result<BuildOverview, BuildError> {
+    guard(&session)?;
+    on_builder(&builder, move |builder| {
+        builder.playtest(project_id)?;
+        builder.overview(project_id, false)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn stop_playtest(
+    project_id: i64,
+    builder: Builders<'_>,
+    session: State<'_, ActiveSession>,
+) -> Result<(), BuildError> {
+    guard(&session)?;
+    builder.stop_playtest(project_id);
+    Ok(())
 }
 
 async fn on_root<T, F>(root: &Arc<GamesRoot>, task: F) -> Result<T, BuildError>

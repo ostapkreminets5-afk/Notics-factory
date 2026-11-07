@@ -1,6 +1,6 @@
 use noctics_shared::{
     GameEngine, MAX_ANALYSIS_KEYWORDS, MAX_PLANNED_SCREENS, MAX_PROJECT_NAME_CHARS, MAX_REFERENCES,
-    MAX_SCREEN_SUMMARY_CHARS, MAX_SCREEN_TITLE_CHARS, MIN_REFERENCES, PALETTE_SIZE, PromptAnalysis,
+    MAX_SCREEN_SUMMARY_CHARS, MAX_SCREEN_TITLE_CHARS, MIN_REFERENCES, PALETTE_SIZE, Project, PromptAnalysis,
     REFERENCE_PALETTE_SIZE, Reference, ReferenceTopic, SCREEN_HEIGHT, SCREEN_WIDTH, SearchNeed, Skill,
     StudioError, StyleGuide, is_hex_color,
 };
@@ -16,13 +16,21 @@ const MAX_FONTS_CHARS: usize = 60;
 const MAX_MOOD_CHARS: usize = 40;
 const MAX_PITCH_CHARS: usize = 200;
 const MAX_CORNER_RADIUS: i64 = 32;
+const MAX_TAKEN_STYLES: usize = 8;
+const MAX_NOTE_CHARS: usize = 90;
+const MAX_LOOK_CHARS: usize = 700;
+const PALETTE_ROLES: [&str; PALETTE_SIZE] = ["фон", "поверхня панелей", "колір світу", "текст", "акцент головної дії"];
 const MAX_REFERENCE_TITLE_CHARS: usize = 60;
 const MAX_REFERENCE_NOTE_CHARS: usize = 160;
 const MAX_REFERENCE_QUERY_CHARS: usize = 80;
 const MAX_ANALYSIS_SUMMARY_CHARS: usize = 420;
 const MAX_KEYWORD_CHARS: usize = 32;
 const MAX_NEED_CHARS: usize = 160;
-const PIN_TITLES_PER_REFERENCE: usize = 3;
+const TITLES_PER_SOURCE: usize = 3;
+const THEME_WORDS: usize = 3;
+const GENERIC_QUERY_WORDS: [&str; 12] = [
+    "game", "games", "ui", "hud", "vfx", "concept", "art", "asset", "assets", "sprite", "3d", "2d",
+];
 
 pub struct Plan {
     pub name: String,
@@ -113,10 +121,60 @@ struct RawReference {
 
 #[derive(Deserialize)]
 struct RawStyle {
-    palette: Vec<String>,
+    #[serde(default)]
+    look: String,
+    palette: Vec<RawColor>,
     fonts: String,
     corner_radius: i64,
     mood: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawColor {
+    Described {
+        hex: String,
+        #[serde(default)]
+        role: String,
+        #[serde(default)]
+        source: String,
+    },
+    Bare(String),
+}
+
+impl RawColor {
+    fn hex(&self) -> String {
+        match self {
+            Self::Described { hex, .. } | Self::Bare(hex) => hex.trim().to_lowercase(),
+        }
+    }
+
+    fn note(&self) -> String {
+        let Self::Described { role, source, .. } = self else {
+            return String::new();
+        };
+        let (role, source) = (clip(role, MAX_NOTE_CHARS), clip(source, MAX_NOTE_CHARS));
+        let note = match (role.is_empty(), source.is_empty()) {
+            (false, false) => format!("{role} — {source}"),
+            (false, true) => role,
+            _ => source,
+        };
+        clip(&note, MAX_NOTE_CHARS)
+    }
+}
+
+#[derive(Deserialize)]
+struct RawStyleAnswer {
+    style: RawStyle,
+}
+
+pub struct StyleBrief<'a> {
+    pub prompt: &'a str,
+    pub game_name: &'a str,
+    pub pitch: &'a str,
+    pub design_document: &'a str,
+    pub style: &'a StyleGuide,
+    pub board: &'a [Reference],
 }
 
 #[derive(Deserialize)]
@@ -157,7 +215,7 @@ pub fn engine_brief(engine: GameEngine) -> String {
     )
 }
 
-pub fn plan_message(prompt: &str, engine: GameEngine) -> String {
+pub fn plan_message(prompt: &str, engine: GameEngine, earlier: &[Project]) -> String {
     format!(
         "Промпт гравця:\n<prompt>\n{prompt}\n</prompt>\n\n\
 {}\n\n\
@@ -165,16 +223,89 @@ pub fn plan_message(prompt: &str, engine: GameEngine) -> String {
 - name: робоча назва гри, 1–3 слова, до {MAX_PROJECT_NAME_CHARS} символів.\n\
 - pitch: одне речення для картки проєкту.\n\
 - design_document: короткий бриф гри в Markdown, 5–8 речень — жанр, світ, герой, основний цикл. Повний дизайн-документ, лор та інше окремо зроблять навички студії.\n\
-- style: візуальна мова інтерфейсу гри. palette — рівно {PALETTE_SIZE} кольорів #rrggbb від фону до акценту; \
-fonts — два шрифти з Google Fonts у форматі «Display / Text»; corner_radius — радіус кутів у px від 0 до {MAX_CORNER_RADIUS}; \
-mood — 2–4 слова про настрій і фактуру.\n\
+- style: візуальна мова інтерфейсу гри — look, palette, fonts, corner_radius, mood за правилами стилю нижче.\n\
 - screens: 4–6 ключових екранів інтерфейсу саме цієї гри (головне меню, HUD, вибір рівня, пауза, інвентар, фінальні титри — що їй потрібно). \
 title — 1–3 слова; summary — що на екрані, до 80 символів.\n\
 {}\n\n\
-Стиль має випливати з жанру й світу гри: не бери за замовчуванням темний фон з неоновим акцентом, \
-кремовий фон із засічками чи моноширинні підписи, якщо світ гри цього не просить.",
+{}{}",
         engine_brief(engine),
-        reference_rules()
+        reference_rules(),
+        style_rules(),
+        taken_styles(earlier)
+    )
+}
+
+fn style_rules() -> String {
+    let roles = PALETTE_ROLES
+        .iter()
+        .map(|role| format!("«{role}»"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Правила стилю. Стиль виводь зі світу саме цієї гри, а не з загальних звичок. \
+Спершу look — 2–4 речення про те, як цей світ і його інтерфейс виглядають у кадрі: час доби й світло, погода, \
+головні матеріали й поверхні (з чого зроблені панелі, рамки й кнопки — папір, лакове дерево, ковані залізо, скло, тканина…), \
+орнаменти й мотиви світу, кольори героя, ворогів, загрози й надії. \
+Потім palette — рівно {PALETTE_SIZE} кольорів, кожен узятий з look: hex у форматі #rrggbb, role і source. Ролі по порядку: {roles}. \
+source — конкретна річ цього світу, звідки колір («кленове листя на рисових терасах», «світло паперових ліхтарів»), \
+а не загальне слово на кшталт «темний» чи «нейтральний». Насиченість і світлість — такі, як у самому світі: \
+похмурий світ може бути приглушеним, святковий — соковитим. Текст має добре читатися на фоні й поверхні, акцент — виділятися на обох. \
+fonts — два шрифти з Google Fonts у форматі «Display / Text», що пасують епосі, культурі й матеріалам світу; \
+corner_radius — радіус кутів у px від 0 до {MAX_CORNER_RADIUS}, як у форм цього світу; mood — 2–4 слова про настрій і фактуру. \
+Не бери гаму чи оформлення за замовчуванням — темний фон з неоновим акцентом, кремовий фон із засічками, \
+сіро-бежеву гаму з одним червоним акцентом, моноширинні підписи, — якщо їх не дає сам світ гри."
+    )
+}
+
+fn taken_styles(earlier: &[Project]) -> String {
+    let taken: Vec<String> = earlier
+        .iter()
+        .filter(|project| !project.style.palette.is_empty())
+        .take(MAX_TAKEN_STYLES)
+        .map(|project| {
+            format!(
+                "- «{}»: {}; шрифти {}; настрій {}",
+                project.name,
+                project.style.palette.join(", "),
+                project.style.fonts,
+                project.style.mood
+            )
+        })
+        .collect();
+    if taken.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nІнші ігри студії вже мають такі стилі. Не переноси їх звідти за звичкою: кожен колір і шрифт має випливати \
+з цього світу, а збіг допустимий лише тоді, коли його вимагає сам світ.\n{}",
+        taken.join("\n")
+    )
+}
+
+pub fn restyle_message(brief: &StyleBrief<'_>, earlier: &[Project]) -> String {
+    let board = visual_references(brief.board);
+    let references = if board.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Дошка референсів гри:\n<references>\n{}\n</references>\n\n",
+            describe_references(&board)
+        )
+    };
+    format!(
+        "Промпт гравця:\n<prompt>\n{}\n</prompt>\n\n\
+Гра: {} — {}\n\n<design_document>\n{}\n</design_document>\n\n{references}\
+Поточний стиль цієї гри не випливає з її світу: палітра {}; шрифти {}; настрій {}. \
+Виведи новий стиль саме з цього світу.\n\n{}{}",
+        brief.prompt,
+        brief.game_name,
+        brief.pitch,
+        brief.design_document,
+        brief.style.palette.join(", "),
+        brief.style.fonts,
+        brief.style.mood,
+        style_rules(),
+        taken_styles(earlier)
     )
 }
 
@@ -182,20 +313,77 @@ fn topic_codes() -> Vec<&'static str> {
     ReferenceTopic::ALL.iter().map(|topic| topic.code()).collect()
 }
 
+fn search_hint(topic: ReferenceTopic) -> Option<&'static str> {
+    match topic {
+        ReferenceTopic::World => Some("game environment concept art"),
+        ReferenceTopic::Characters => Some("game character concept art"),
+        ReferenceTopic::Characters3d => Some("stylized 3d game character render"),
+        ReferenceTopic::Light => Some("game lighting mood concept art"),
+        ReferenceTopic::Vfx => Some("game vfx effect"),
+        ReferenceTopic::VfxSprites => Some("vfx sprite sheet animation"),
+        ReferenceTopic::Interface => Some("game ui hud design"),
+        ReferenceTopic::MainMenu => Some("game main menu screen ui"),
+        ReferenceTopic::Panels => Some("game ui panel frame"),
+        ReferenceTopic::Buttons => Some("game ui buttons"),
+        ReferenceTopic::Icons => Some("game icons set"),
+        ReferenceTopic::Materials => Some("stylized texture material"),
+        ReferenceTopic::Props => Some("game props concept art"),
+        ReferenceTopic::Animation => Some("sprite animation frames"),
+        ReferenceTopic::Sounds | ReferenceTopic::Music => None,
+    }
+}
+
+fn fallback_need(topic: ReferenceTopic) -> &'static str {
+    match topic {
+        ReferenceTopic::World => "Світ гри: локації, архітектура, природа й масштаб",
+        ReferenceTopic::Characters => "Герої й вороги: силует, пропорції, одяг і читабельність у кадрі",
+        ReferenceTopic::Characters3d => "Візуальний стиль 3D-персонажів: стилізація, пропорції, матеріали й рендер",
+        ReferenceTopic::Light => "Світло й настрій сцен: час доби, контраст, кольорові акценти",
+        ReferenceTopic::Vfx => "Ефекти ударів, магії, частинок і вибухів",
+        ReferenceTopic::VfxSprites => "Покадрові спрайт-шити VFX: вибухи, удари, магія, дим",
+        ReferenceTopic::Interface => "HUD і загальна мова інтерфейсу гри",
+        ReferenceTopic::MainMenu => "Головне меню: композиція, фон, логотип і пункти меню",
+        ReferenceTopic::Panels => "Панелі й рамки вікон, інвентаря та діалогів",
+        ReferenceTopic::Buttons => "Кнопки: форма, стани, обведення й фактура",
+        ReferenceTopic::Icons => "Іконки предметів, умінь і ресурсів",
+        ReferenceTopic::Materials => "Матеріали й фактури поверхонь",
+        ReferenceTopic::Props => "Предмети, зброя й деталі оточення",
+        ReferenceTopic::Animation => "Анімація персонажів: пози, рух, ключові кадри",
+        ReferenceTopic::Sounds => "Звуки ударів, кроків, інтерфейсу й оточення",
+        ReferenceTopic::Music => "Музика гри: жанр, темп і настрій",
+    }
+}
+
+fn query_hints() -> String {
+    ReferenceTopic::ALL
+        .into_iter()
+        .filter_map(|topic| search_hint(topic).map(|hint| format!("{} — «{hint}»", topic.code())))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn reference_rules() -> String {
     let topics = topic_codes().join(", ");
+    let always: String = ReferenceTopic::ALWAYS_SEARCHED
+        .iter()
+        .map(|topic| topic.code())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let hints = query_hints();
     format!(
-        "- analysis: спершу розбери промпт гравця, щоб знати, що шукати в Pinterest. \
+        "- analysis: спершу розбери промпт гравця, щоб знати, що шукати в Pinterest і на ArtStation. \
 summary — 2–3 речення до 300 символів: жанр, світ, камера, художній стиль і настрій, які випливають із промпту; \
 keywords — 5–{MAX_ANALYSIS_KEYWORDS} коротких візуальних ключових слів із промпту, по 1–3 слова; \
 needs — що саме треба знайти для цієї гри, по одному пункту на тему: topic — одне з: {topics}; \
 what — що конкретно шукати й навіщо грі, до 120 символів. \
-Обов’язково продумай VFX і ефекти (удари, магія, частинки, вибухи), панелі й рамки інтерфейсу, кнопки, іконки, \
-персонажів і ворогів, анімацію, звуки й музику — пропусти тему лише тоді, коли в цій грі її справді немає.\n\
+Теми {always} шукаються для кожної гри обов’язково: персонажі й вороги, візуальний стиль 3D-персонажів, інтерфейс і HUD, \
+головне меню, панелі й рамки, кнопки, VFX-ефекти (удари, магія, частинки, вибухи) і VFX-спрайти — покадрові спрайт-шити анімацій ефектів. \
+По кожній із них дай пункт needs і щонайменше один референс. Також продумай світ, світло, іконки, матеріали, предмети, анімацію, \
+звуки й музику — пропусти таку тему лише тоді, коли в цій грі її справді немає.\n\
 - references: {MIN_REFERENCES}–{MAX_REFERENCES} референсів за пунктами needs — щонайменше один на кожен пункт. \
 topic — одне з: {topics}; title — що на референсі, 2–6 слів; note — що саме взяти з нього для гри, до 120 символів; \
-query — для візуальних тем це пошуковий запит для Pinterest англійською, 3–7 слів; для vfx, interface, panels, buttons, icons та animation додавай у запит \
-«game ui», «game vfx», «game asset» чи «sprite animation», щоб Pinterest віддав саме ігрові елементи; \
+query — для візуальних тем це пошуковий запит для Pinterest і ArtStation англійською, 4–9 слів: суть саме цієї гри плюс ігрове уточнення теми, \
+щоб пошук віддав саме ігрові елементи, а не випадкові картинки: {hints}; \
 для sounds і music query — це теги звучання англійською для генерації в ComfyUI: жанр, інструменти, темп, настрій, фактура звуку, \
 напр. «dark ambient, low drones, slow 70 bpm» чи «short crunchy sword hit, metallic, dry»; \
 palette — {REFERENCE_PALETTE_SIZE} кольори #rrggbb, що домінують на таких референсах, для sounds і music — порожній масив. \
@@ -279,14 +467,84 @@ pub fn parse_references(text: &str) -> Result<ReferenceBoard, StudioError> {
     let board: RawReferenceBoard = serde_json::from_str(text.trim()).map_err(|error| {
         StudioError::Claude(format!("the reference board was not valid JSON: {error}"))
     })?;
-    let references = clean_references(&board.references);
+    let mut references = clean_references(&board.references);
     if references.is_empty() {
         return Err(StudioError::Claude("the reference board was empty".into()));
     }
-    Ok(ReferenceBoard {
-        analysis: clean_analysis(&board.analysis),
-        references,
-    })
+    let mut analysis = clean_analysis(&board.analysis);
+    complete_board(&mut analysis, &mut references);
+    Ok(ReferenceBoard { analysis, references })
+}
+
+fn complete_board(analysis: &mut PromptAnalysis, references: &mut Vec<Reference>) {
+    if references.is_empty() {
+        return;
+    }
+    let theme = board_theme(references);
+    for topic in ReferenceTopic::ALWAYS_SEARCHED {
+        if analysis.need_for(topic).is_none() {
+            analysis.needs.push(SearchNeed {
+                topic,
+                what: fallback_need(topic).to_owned(),
+            });
+        }
+        if !references.iter().any(|reference| reference.topic == topic) {
+            references.push(fallback_reference(topic, &theme));
+        }
+    }
+    while references.len() > MAX_REFERENCES {
+        let Some(spare) = spare_reference(references) else {
+            break;
+        };
+        references.remove(spare);
+    }
+}
+
+fn board_theme(references: &[Reference]) -> String {
+    let visual = || references.iter().filter(|reference| !reference.topic.is_audio());
+    let Some(source) = visual()
+        .find(|reference| reference.topic == ReferenceTopic::World)
+        .or_else(|| visual().next())
+    else {
+        return String::new();
+    };
+    source
+        .query
+        .split_whitespace()
+        .filter(|word| !GENERIC_QUERY_WORDS.contains(&word.to_lowercase().as_str()))
+        .take(THEME_WORDS)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn fallback_reference(topic: ReferenceTopic, theme: &str) -> Reference {
+    let hint = search_hint(topic).unwrap_or_default();
+    Reference {
+        topic,
+        title: topic.label().to_owned(),
+        note: fallback_need(topic).to_owned(),
+        query: clip(&format!("{theme} {hint}"), MAX_REFERENCE_QUERY_CHARS),
+        palette: Vec::new(),
+        pins: Vec::new(),
+        artworks: Vec::new(),
+    }
+}
+
+fn spare_reference(references: &[Reference]) -> Option<usize> {
+    let repeated = |topic: ReferenceTopic| {
+        references
+            .iter()
+            .filter(|reference| reference.topic == topic)
+            .count()
+            > 1
+    };
+    let newest_first = || (0..references.len()).rev();
+    newest_first()
+        .find(|&index| repeated(references[index].topic))
+        .or_else(|| {
+            newest_first()
+                .find(|&index| !ReferenceTopic::ALWAYS_SEARCHED.contains(&references[index].topic))
+        })
 }
 
 fn clean_analysis(raw: &RawAnalysis) -> PromptAnalysis {
@@ -340,6 +598,7 @@ fn clean_references(raw: &[RawReference]) -> Vec<Reference> {
                     .take(REFERENCE_PALETTE_SIZE)
                     .collect(),
                 pins: Vec::new(),
+                artworks: Vec::new(),
             })
         })
         .take(MAX_REFERENCES)
@@ -362,25 +621,31 @@ fn describe_reference(reference: &Reference) -> String {
             reference.title, reference.note, reference.query
         );
     }
-    let pins: Vec<&str> = reference
-        .pins
-        .iter()
-        .map(|pin| pin.title.trim())
-        .filter(|title| !title.is_empty())
-        .take(PIN_TITLES_PER_REFERENCE)
-        .collect();
-    let seen = if pins.is_empty() {
-        String::new()
-    } else {
-        format!("; на пінах: {}", pins.join(" · "))
-    };
+    let pins = sample_titles(reference.pins.iter().map(|pin| pin.title.as_str()));
+    let artworks = sample_titles(reference.artworks.iter().map(|artwork| artwork.title.as_str()));
+    let mut seen = String::new();
+    if !pins.is_empty() {
+        seen.push_str(&format!("; на пінах: {pins}"));
+    }
+    if !artworks.is_empty() {
+        seen.push_str(&format!("; на ArtStation: {artworks}"));
+    }
     format!(
-        "- [{topic}] {} — {} (Pinterest: «{}»; кольори: {}{seen})",
+        "- [{topic}] {} — {} (пошук: «{}»; кольори: {}{seen})",
         reference.title,
         reference.note,
         reference.query,
         reference.palette.join(", ")
     )
+}
+
+fn sample_titles<'a>(titles: impl Iterator<Item = &'a str>) -> String {
+    titles
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .take(TITLES_PER_SOURCE)
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub fn visual_references(references: &[Reference]) -> Vec<Reference> {
@@ -398,17 +663,7 @@ pub fn plan_schema() -> Value {
             "name": { "type": "string" },
             "pitch": { "type": "string" },
             "design_document": { "type": "string" },
-            "style": {
-                "type": "object",
-                "properties": {
-                    "palette": { "type": "array", "items": { "type": "string" } },
-                    "fonts": { "type": "string" },
-                    "corner_radius": { "type": "integer" },
-                    "mood": { "type": "string" }
-                },
-                "required": ["palette", "fonts", "corner_radius", "mood"],
-                "additionalProperties": false
-            },
+            "style": style_object_schema(),
             "screens": {
                 "type": "array",
                 "items": {
@@ -429,25 +684,82 @@ pub fn plan_schema() -> Value {
     })
 }
 
+fn style_object_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "look": { "type": "string" },
+            "palette": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "hex": { "type": "string" },
+                        "role": { "type": "string" },
+                        "source": { "type": "string" }
+                    },
+                    "required": ["hex", "role", "source"],
+                    "additionalProperties": false
+                }
+            },
+            "fonts": { "type": "string" },
+            "corner_radius": { "type": "integer" },
+            "mood": { "type": "string" }
+        },
+        "required": ["look", "palette", "fonts", "corner_radius", "mood"],
+        "additionalProperties": false
+    })
+}
+
+pub fn style_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": { "style": style_object_schema() },
+        "required": ["style"],
+        "additionalProperties": false
+    })
+}
+
+pub fn parse_style(text: &str) -> Result<StyleGuide, StudioError> {
+    let raw: RawStyleAnswer = serde_json::from_str(text.trim()).map_err(|error| {
+        StudioError::Claude(format!("the game style was not valid JSON: {error}"))
+    })?;
+    Ok(clean_style(&raw.style))
+}
+
+fn clean_style(raw: &RawStyle) -> StyleGuide {
+    let chosen: Vec<(String, String)> = raw
+        .palette
+        .iter()
+        .map(|color| (color.hex(), color.note()))
+        .filter(|(hex, _)| is_hex_color(hex))
+        .take(PALETTE_SIZE)
+        .collect();
+    let mut palette: Vec<String> = chosen.iter().map(|(hex, _)| hex.clone()).collect();
+    let mut palette_notes: Vec<String> = chosen.into_iter().map(|(_, note)| note).collect();
+    for color in DEFAULT_PALETTE.iter().skip(palette.len()) {
+        palette.push((*color).to_owned());
+        palette_notes.push(String::new());
+    }
+    let fonts = clip(&raw.fonts, MAX_FONTS_CHARS);
+    StyleGuide {
+        palette,
+        palette_notes,
+        fonts: if fonts.is_empty() {
+            DEFAULT_FONTS.to_owned()
+        } else {
+            fonts
+        },
+        corner_radius: u8::try_from(raw.corner_radius.clamp(0, MAX_CORNER_RADIUS)).unwrap_or_default(),
+        mood: clip(&raw.mood, MAX_MOOD_CHARS),
+        look: clip(&raw.look, MAX_LOOK_CHARS),
+    }
+}
+
 pub fn parse_plan(text: &str) -> Result<Plan, StudioError> {
     let raw: RawPlan = serde_json::from_str(text.trim()).map_err(|error| {
         StudioError::Claude(format!("the game plan was not valid JSON: {error}"))
     })?;
-    let mut palette: Vec<String> = raw
-        .style
-        .palette
-        .iter()
-        .map(|color| color.trim().to_lowercase())
-        .filter(|color| is_hex_color(color))
-        .take(PALETTE_SIZE)
-        .collect();
-    palette.extend(
-        DEFAULT_PALETTE
-            .iter()
-            .skip(palette.len())
-            .map(|color| (*color).to_owned()),
-    );
-    let fonts = clip(&raw.style.fonts, MAX_FONTS_CHARS);
     let screens: Vec<PlannedScreen> = raw
         .screens
         .iter()
@@ -462,6 +774,9 @@ pub fn parse_plan(text: &str) -> Result<Plan, StudioError> {
         return Err(StudioError::Claude("the game plan had no screens".into()));
     }
     let name = clip(&raw.name, MAX_PROJECT_NAME_CHARS);
+    let mut analysis = clean_analysis(&raw.analysis);
+    let mut references = clean_references(&raw.references);
+    complete_board(&mut analysis, &mut references);
     Ok(Plan {
         name: if name.is_empty() {
             "Нова гра".to_owned()
@@ -470,42 +785,43 @@ pub fn parse_plan(text: &str) -> Result<Plan, StudioError> {
         },
         pitch: clip(&raw.pitch, MAX_PITCH_CHARS),
         design_document: raw.design_document.trim().to_owned(),
-        style: StyleGuide {
-            palette,
-            fonts: if fonts.is_empty() {
-                DEFAULT_FONTS.to_owned()
-            } else {
-                fonts
-            },
-            corner_radius: u8::try_from(raw.style.corner_radius.clamp(0, MAX_CORNER_RADIUS))
-                .unwrap_or_default(),
-            mood: clip(&raw.style.mood, MAX_MOOD_CHARS),
-        },
+        style: clean_style(&raw.style),
         screens,
-        analysis: clean_analysis(&raw.analysis),
-        references: clean_references(&raw.references),
+        analysis,
+        references,
     })
+}
+
+fn style_lines(style: &StyleGuide) -> String {
+    let mut lines = format!(
+        "- Палітра: {}\n- Шрифти: {}\n- Радіус кутів: {} px\n- Настрій: {}\n",
+        style.palette_lines(),
+        style.fonts,
+        style.corner_radius,
+        style.mood
+    );
+    if !style.look.trim().is_empty() {
+        lines.push_str(&format!("- Вигляд світу: {}\n", style.look.trim()));
+    }
+    lines
 }
 
 pub fn screen_message(brief: &ScreenBrief<'_>) -> String {
     let style = brief.style;
     let mut message = format!(
         "Гра: {} — {}\n\n<design_document>\n{}\n</design_document>\n\n\
-Стиль інтерфейсу:\n- Палітра: {}\n- Шрифти: {}\n- Радіус кутів: {} px\n- Настрій: {}\n\n\
+Стиль інтерфейсу:\n{}\n\
 Екрани гри: {}.\n\n",
         brief.game_name,
         brief.pitch,
         brief.design_document,
-        style.palette.join(", "),
-        style.fonts,
-        style.corner_radius,
-        style.mood,
+        style_lines(style),
         brief.sibling_titles.join(", "),
     );
     let board = visual_references(brief.board);
     if !board.is_empty() {
         message.push_str(&format!(
-            "Дошка референсів гри з Pinterest — бери з неї форму панелей, рамок і кнопок, іконки, світло, фактуру й кольори; \
+            "Дошка референсів гри з Pinterest і ArtStation — бери з неї форму панелей, рамок і кнопок, іконки, світло, фактуру й кольори; \
 промпти слотів арту в data-prompt пиши в стилі референсів світу й персонажів:\n<references>\n{}\n</references>\n\n",
             describe_references(&board)
         ));
@@ -533,6 +849,9 @@ pub fn screen_message(brief: &ScreenBrief<'_>) -> String {
 - Екран рівно {SCREEN_WIDTH}×{SCREEN_HEIGHT} px: html і body без відступів, body має width:{SCREEN_WIDTH}px; height:{SCREEN_HEIGHT}px; overflow:hidden.\n\
 - Увесь CSS усередині <style>. Без JavaScript.\n\
 - Без зовнішніх зображень. Іконки інтерфейсу, рамки й роздільники — inline SVG або CSS; атмосферу фону — світло, туман, глибину — CSS-градієнтами.\n\
+- Оформлення — матеріал панелей, форма рамок і кнопок, орнаменти, світло й фон — бери з вигляду світу цієї гри й дошки референсів. \
+Кожен колір палітри використовуй у його ролі. Не збирай екран із загального набору темної гри — місяць, туман, жарини, віньєтка, \
+зерно плівки, рядок підказок клавіш унизу, — якщо цього не просить сам світ і жанр.\n\
 - Персонажів, істот, обличчя, предмети, локації та будь-які ілюстрації ніколи не малюй SVG, CSS-фігурами чи іншими примітивами — жодних кіл, еліпсів, трикутників і паличок замість арту. На їхньому місці постав слот арту: <figure class=\"art-slot\" data-art=\"art/<тека>/<назва>.png\" data-prompt=\"<промпт англійською для ComfyUI>\"> потрібного розміру, з тонкою рамкою в стилі екрана й підписом шляху файлу всередині. Слот заповнить арт, згенерований у ComfyUI на етапі збірки.\n\
 - Шрифти — лише через <link> з fonts.googleapis.com.\n\
 - Тексти інтерфейсу — мовою гри, з назвами й числами з дизайн-документа, без lorem ipsum.\n\
@@ -547,22 +866,19 @@ pub fn deliverable_message(job: &OutputJob) -> String {
         "Промпт гравця:\n<prompt>\n{}\n</prompt>\n\n\
 {}\n\n\
 Гра: {} — {}\n\n<brief>\n{}\n</brief>\n\n\
-Стиль інтерфейсу:\n- Палітра: {}\n- Шрифти: {}\n- Радіус кутів: {} px\n- Настрій: {}\n\n\
+Стиль інтерфейсу:\n{}\n\
 Екрани гри: {}.\n\n",
         job.prompt,
         engine_brief(job.engine),
         job.game_name,
         job.pitch,
         job.brief,
-        style.palette.join(", "),
-        style.fonts,
-        style.corner_radius,
-        style.mood,
+        style_lines(style),
         job.screen_titles.join(", "),
     );
     if !job.references.is_empty() {
         message.push_str(&format!(
-            "Дошка референсів Pinterest, яку підібрало AI-ядро:\n<references>\n{}\n</references>\n\n",
+            "Дошка референсів Pinterest і ArtStation, яку підібрало AI-ядро:\n<references>\n{}\n</references>\n\n",
             describe_references(&job.references)
         ));
     }
@@ -601,7 +917,7 @@ fn clip(text: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use noctics_shared::{Pin, SkillCategory};
+    use noctics_shared::{Artwork, Pin, SkillCategory};
 
     use super::*;
 
@@ -640,13 +956,22 @@ mod tests {
                 query: "rainy rooftops night lanterns".into(),
                 palette: vec!["#0b0e1a".into(), "#f2b444".into()],
                 pins: Vec::new(),
+                artworks: vec![
+                    Artwork::checked(
+                        "2B1Xae",
+                        "https://cdna.artstation.com/p/assets/images/images/085/683/878/smaller_square/roofs.jpg",
+                        "Rainy roofs",
+                        "",
+                    )
+                    .unwrap(),
+                ],
             }],
         };
         let message = deliverable_message(&job);
         assert!(message.contains("<prompt>\nСтелс про злодія\n</prompt>"));
         assert!(message.contains("Рушій гри: Unreal Engine (C++ / Blueprints)."));
         assert!(message.contains(
-            "- [Світло й настрій] Мокрі дахи вночі — Відблиски ліхтарів у калюжах (Pinterest: «rainy rooftops night lanterns»; кольори: #0b0e1a, #f2b444)"
+            "- [Світло й настрій] Мокрі дахи вночі — Відблиски ліхтарів у калюжах (пошук: «rainy rooftops night lanterns»; кольори: #0b0e1a, #f2b444; на ArtStation: Rainy roofs)"
         ));
         assert!(message.contains("<previous_result skill=\"Специфікація моделей\">\n| asset |"));
         assert!(message.contains("Екрани гри: Головне меню, HUD."));
@@ -655,9 +980,134 @@ mod tests {
 
     #[test]
     fn plan_brief_names_the_engine() {
-        let message = plan_message("Гонки на човнах", GameEngine::Penumbra);
+        let message = plan_message("Гонки на човнах", GameEngine::Penumbra, &[]);
         assert!(message.contains("<prompt>\nГонки на човнах\n</prompt>"));
         assert!(message.contains("Рушій гри: Penumbra (Rust · wgpu)."));
+        assert!(message.contains("Спершу look"));
+        assert!(message.contains("«фон», «поверхня панелей», «колір світу», «текст», «акцент головної дії»"));
+        assert!(!message.contains("Інші ігри студії"));
+    }
+
+    #[test]
+    fn reads_each_color_with_the_reason_it_was_chosen() {
+        let plan = parse_plan(
+            r##"{
+                "name": "Шлях Тіні",
+                "pitch": "Ніндзя в осінніх сутінках.",
+                "design_document": "# GDD",
+                "style": {
+                    "look": "Осінні сутінки над рисовими терасами, паперові ліхтарі, лакове дерево.",
+                    "palette": [
+                        {"hex": "#1A1C2B", "role": "фон", "source": "сутінкове небо над горами"},
+                        {"hex": "#3b2a22", "role": "поверхня панелей", "source": "лакове дерево замку"},
+                        {"hex": "nope", "role": "колір світу", "source": "кленове листя"},
+                        {"hex": "#e0782e", "role": "колір світу", "source": "кленове листя на терасах"},
+                        {"hex": "#f3e3c3", "role": "текст", "source": ""},
+                        {"hex": "#c8322a", "role": "", "source": "печатка клану Ворона"}
+                    ],
+                    "fonts": "Yuji Syuku / Noto Sans JP",
+                    "corner_radius": 2,
+                    "mood": "тушевий, осінній"
+                },
+                "screens": [{"title": "Головне меню", "summary": "Старт"}]
+            }"##,
+        )
+        .unwrap();
+        let style = plan.style;
+        assert_eq!(style.palette, ["#1a1c2b", "#3b2a22", "#e0782e", "#f3e3c3", "#c8322a"]);
+        assert_eq!(style.palette_note(0), Some("фон — сутінкове небо над горами"));
+        assert_eq!(style.palette_note(2), Some("колір світу — кленове листя на терасах"));
+        assert_eq!(style.palette_note(3), Some("текст"));
+        assert_eq!(style.palette_note(4), Some("печатка клану Ворона"));
+        assert!(style.look.starts_with("Осінні сутінки"));
+        let restyled = parse_style(
+            r##"{"style": {"look": "Туман", "palette": [{"hex": "#101010", "role": "фон", "source": "ніч"}], "fonts": "", "corner_radius": 8, "mood": "тиша"}}"##,
+        )
+        .unwrap();
+        assert_eq!(restyled.palette.len(), PALETTE_SIZE);
+        assert_eq!(restyled.palette_notes.len(), PALETTE_SIZE);
+        assert_eq!(restyled.palette_note(1), None);
+        assert_eq!(restyled.fonts, DEFAULT_FONTS);
+    }
+
+    #[test]
+    fn screens_follow_the_look_of_their_own_world() {
+        let style = StyleGuide {
+            palette: vec!["#1a1c2b".into(), "#e0782e".into()],
+            palette_notes: vec!["фон — сутінкове небо".into(), "колір світу — кленове листя".into()],
+            fonts: "Yuji Syuku / Noto Sans JP".into(),
+            corner_radius: 2,
+            mood: "тушевий".into(),
+            look: "Паперові ліхтарі й лакове дерево.".into(),
+        };
+        let titles = vec!["Головне меню".to_owned()];
+        let message = screen_message(&ScreenBrief {
+            game_name: "Шлях Тіні",
+            pitch: "Ніндзя",
+            design_document: "# GDD",
+            style: &style,
+            sibling_titles: &titles,
+            title: "Головне меню",
+            summary: "Старт",
+            board: &[],
+            reference: None,
+            revision: None,
+        });
+        assert!(message.contains("- Палітра: #1a1c2b (фон — сутінкове небо); #e0782e (колір світу — кленове листя)"));
+        assert!(message.contains("- Вигляд світу: Паперові ліхтарі й лакове дерево."));
+        assert!(message.contains("Не збирай екран із загального набору темної гри"));
+    }
+
+    #[test]
+    fn plan_brief_keeps_new_games_off_earlier_palettes() {
+        let earlier = Project {
+            id: 1,
+            name: "Шлях Тіні".into(),
+            prompt: "Ніндзя".into(),
+            pitch: String::new(),
+            engine: GameEngine::Godot,
+            status: noctics_shared::ProjectStatus::Ready,
+            style: StyleGuide {
+                palette: vec!["#1b1d26".into(), "#d6402a".into()],
+                fonts: "Rubik Dirt / Exo 2".into(),
+                corner_radius: 2,
+                mood: String::new(),
+                ..StyleGuide::default()
+            },
+            references: Vec::new(),
+            analysis: PromptAnalysis::default(),
+            cover_screen_id: None,
+            cover_html: None,
+            screen_count: 0,
+            approved_count: 0,
+            pending_count: 0,
+            error: None,
+            created_at: 0,
+        };
+        let unplanned = Project {
+            id: 2,
+            name: "Нова гра".into(),
+            style: StyleGuide::default(),
+            ..earlier.clone()
+        };
+        let message = plan_message("Ще одна гра про ніндзя", GameEngine::Godot, &[unplanned, earlier.clone()]);
+        assert!(message.contains("Не переноси їх звідти за звичкою"));
+        assert!(message.contains("- «Шлях Тіні»: #1b1d26, #d6402a; шрифти Rubik Dirt / Exo 2"));
+        assert!(!message.contains("«Нова гра»"));
+        let board = Vec::new();
+        let restyle = restyle_message(
+            &StyleBrief {
+                prompt: "Ніндзя",
+                game_name: "Шлях Тіні",
+                pitch: "Тінь у горах",
+                design_document: "# GDD",
+                style: &earlier.style,
+                board: &board,
+            },
+            &[],
+        );
+        assert!(restyle.contains("Поточний стиль цієї гри не випливає з її світу: палітра #1b1d26, #d6402a"));
+        assert!(restyle.contains("Спершу look"));
     }
 
     #[test]
@@ -700,6 +1150,7 @@ mod tests {
             .map(|screen| screen.title.as_str())
             .collect();
         assert_eq!(titles, ["Головне меню", "HUD"]);
+        assert!(plan.references.is_empty());
     }
 
     #[test]
@@ -713,12 +1164,12 @@ mod tests {
         )
         .unwrap();
         let references = &board.references;
-        assert_eq!(references.len(), 2);
+        assert_eq!(references.len(), 1 + ReferenceTopic::ALWAYS_SEARCHED.len());
         assert_eq!(references[0].topic, ReferenceTopic::Characters);
         assert_eq!(references[0].title, "Злодій у плащі");
         assert_eq!(references[0].palette, ["#112233", "#abcdef", "#000"]);
         assert_eq!(references[1].topic, ReferenceTopic::World);
-        assert!(board.analysis.is_empty());
+        assert!(board.analysis.summary.is_empty() && board.analysis.keywords.is_empty());
         assert!(parse_references(r#"{"references": []}"#).is_err());
         assert!(parse_references("не json").is_err());
     }
@@ -748,7 +1199,8 @@ mod tests {
         assert_eq!(analysis.summary, "Темне фентезі з ізометричною камерою.");
         assert_eq!(analysis.keywords, ["руни", "туман"]);
         let topics: Vec<ReferenceTopic> = analysis.needs.iter().map(|need| need.topic).collect();
-        assert_eq!(topics, [ReferenceTopic::Vfx, ReferenceTopic::Panels]);
+        assert_eq!(topics[..2], [ReferenceTopic::Vfx, ReferenceTopic::Panels]);
+        assert_eq!(topics.len(), ReferenceTopic::ALWAYS_SEARCHED.len());
         assert_eq!(
             analysis.need_for(ReferenceTopic::Vfx).unwrap().what,
             "Спалахи рун при ударі"
@@ -768,9 +1220,68 @@ mod tests {
         });
         assert!(message.contains("<prompt>\nРогалик про алхіміка\n</prompt>"));
         assert!(message.contains("- analysis:"));
-        assert!(message.contains("vfx, interface, panels, buttons"));
+        assert!(message.contains(
+            "Теми characters, characters_3d, interface, main_menu, panels, buttons, vfx, vfx_sprites шукаються для кожної гри обов’язково"
+        ));
+        assert!(message.contains("vfx_sprites — «vfx sprite sheet animation»"));
+        assert!(message.contains("main_menu — «game main menu screen ui»"));
+        assert!(!message.contains("music — «"));
         let schema = references_schema();
         assert_eq!(schema["required"], json!(["analysis", "references"]));
+        let codes = &schema["properties"]["references"]["items"]["properties"]["topic"]["enum"];
+        assert!(codes.as_array().unwrap().contains(&json!("characters_3d")));
+    }
+
+    #[test]
+    fn always_searches_the_core_game_topics() {
+        let board = parse_references(
+            r##"{"references": [
+                {"topic": "world", "title": "Готичні руїни", "note": "", "query": "foggy gothic game cathedral ruins", "palette": []},
+                {"topic": "main_menu", "title": "Меню в соборі", "note": "", "query": "gothic cathedral main menu game ui", "palette": []}
+            ]}"##,
+        )
+        .unwrap();
+        for topic in ReferenceTopic::ALWAYS_SEARCHED {
+            assert!(board.references.iter().any(|reference| reference.topic == topic));
+            assert!(board.analysis.need_for(topic).is_some());
+        }
+        let menus = board
+            .references
+            .iter()
+            .filter(|reference| reference.topic == ReferenceTopic::MainMenu)
+            .count();
+        assert_eq!(menus, 1);
+        let sprites = board
+            .references
+            .iter()
+            .find(|reference| reference.topic == ReferenceTopic::VfxSprites)
+            .unwrap();
+        assert_eq!(sprites.title, "VFX-спрайти й анімація");
+        assert_eq!(sprites.query, "foggy gothic cathedral vfx sprite sheet animation");
+        let styles = board
+            .references
+            .iter()
+            .find(|reference| reference.topic == ReferenceTopic::Characters3d)
+            .unwrap();
+        assert_eq!(styles.query, "foggy gothic cathedral stylized 3d game character render");
+    }
+
+    #[test]
+    fn keeps_core_topics_when_the_board_is_full() {
+        let crowded: Vec<String> = (0..MAX_REFERENCES)
+            .map(|index| {
+                format!(
+                    r#"{{"topic": "props", "title": "Предмет {index}", "note": "", "query": "rusty lantern {index}", "palette": []}}"#
+                )
+            })
+            .collect();
+        let board = parse_references(&format!(r#"{{"references": [{}]}}"#, crowded.join(","))).unwrap();
+        assert_eq!(board.references.len(), MAX_REFERENCES);
+        for topic in ReferenceTopic::ALWAYS_SEARCHED {
+            assert!(board.references.iter().any(|reference| reference.topic == topic));
+        }
+        assert_eq!(board.references[0].title, "Предмет 0");
+        assert!(board.references.iter().any(|reference| reference.topic == ReferenceTopic::Props));
     }
 
     #[test]
@@ -801,6 +1312,7 @@ mod tests {
             fonts: "Unbounded / Manrope".into(),
             corner_radius: 12,
             mood: "Неон".into(),
+            ..StyleGuide::default()
         };
         let titles = vec!["Головне меню".to_owned(), "HUD".to_owned()];
         let board = vec![
@@ -815,6 +1327,7 @@ mod tests {
                     image: "https://i.pinimg.com/1.jpg".into(),
                     title: "Carved stone inventory frame".into(),
                 }],
+                artworks: Vec::new(),
             },
             Reference {
                 topic: ReferenceTopic::Music,
@@ -823,6 +1336,7 @@ mod tests {
                 query: "dark ambient, low drones".into(),
                 palette: Vec::new(),
                 pins: Vec::new(),
+                artworks: Vec::new(),
             },
         ];
         let message = screen_message(&ScreenBrief {

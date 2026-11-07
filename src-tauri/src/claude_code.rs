@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use noctics_shared::{CLAUDE_MODEL, ClaudeAccount, StudioError};
+use noctics_shared::{CLAUDE_MODEL, CLAUDE_TIMEOUT, ClaudeAccount, StudioError};
 use serde_json::Value;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -13,6 +13,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const MAX_OUTPUT_TOKENS: &str = "64000";
 const SUBSCRIPTION_AUTH: &str = "claude.ai";
+const NO_TOOLS: &str = "";
+const WEB_TOOLS: &str = "WebSearch,WebFetch";
+const UNATTENDED_PERMISSIONS: &str = "dontAsk";
 pub(crate) const SHADOWING_CREDENTIALS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
 const RATE_LIMITED_STATUS: u64 = 429;
 const OVERLOADED_STATUSES: [u64; 2] = [503, 529];
@@ -85,6 +88,14 @@ impl ClaudeCode {
     }
 
     pub fn complete(&self, completion: &Completion) -> Result<String, StudioError> {
+        self.answer(completion, NO_TOOLS)
+    }
+
+    pub fn research(&self, completion: &Completion) -> Result<String, StudioError> {
+        self.answer(completion, WEB_TOOLS)
+    }
+
+    fn answer(&self, completion: &Completion, tools: &str) -> Result<String, StudioError> {
         let executable = locate().ok_or(StudioError::ClaudeCodeMissing)?;
         std::fs::create_dir_all(&self.workdir).map_err(process_failure)?;
         let prompt_file = self.workdir.join(prompt_file_name());
@@ -96,7 +107,7 @@ impl ClaudeCode {
             "--output-format",
             "json",
             "--tools",
-            "",
+            tools,
             "--safe-mode",
             "--no-session-persistence",
             "--strict-mcp-config",
@@ -107,6 +118,9 @@ impl ClaudeCode {
             "--system-prompt-file",
             &prompt_path,
         ];
+        if !tools.is_empty() {
+            args.extend(["--allowedTools", tools, "--permission-mode", UNATTENDED_PERMISSIONS]);
+        }
         if let Some(schema) = &schema {
             args.extend(["--json-schema", schema.as_str()]);
         }
@@ -209,9 +223,7 @@ fn wait_with_deadline(child: &mut Child, timeout: Duration) -> Result<ExitStatus
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(StudioError::Process(
-                "Claude Code did not answer in time".into(),
-            ));
+            return Err(StudioError::Process(CLAUDE_TIMEOUT.into()));
         }
         thread::sleep(POLL_INTERVAL);
     }

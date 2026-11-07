@@ -1,32 +1,42 @@
 use std::collections::{HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use noctics_shared::{
-    ART_SKILL, BuildError, BuildOverview, BuildStatus, BuildTarget, GameSource, JournalEvent,
-    MAX_BUILD_REQUEST_CHARS, MAX_SOURCE_PATH_CHARS, Project, Readiness, SourceOrigin, SourceStatus,
-    StudioError, TargetReport, format_size, project_marker,
+    ART_SKILL, BuildError, BuildOverview, BuildStatus, BuildTarget, GameEngine, GameSource, JournalEvent,
+    MAX_BUILD_REQUEST_CHARS, MAX_SOURCE_PATH_CHARS, Playtest, PlaytestOverview, PlaytestReport, PlaytestStatus,
+    Project, ProjectDetail, Readiness, SourceOrigin, SourceStatus, StudioError, TargetReport, format_size,
+    project_marker,
 };
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::build_store::{BuildStore, MAX_ACTIVITY, StoredBuild};
+use crate::accounts::unix_now;
+use crate::asset_hunt::Hunter;
+use crate::build_store::{BuildStore, MAX_ACTIVITY, StoredBuild, StoredPlaytest};
 use crate::claude_code;
 use crate::codegen::{self, Assignment, Event};
 use crate::comfy_forge::Forge;
 use crate::games_root::GamesRoot;
+use crate::mixamo::Mixamo;
+use crate::playtest::{self, ErrorLog, Installed};
 use crate::process::{self, LineSink, RunFailure};
 use crate::recipes::{self, Context, GameNames, StepFailure};
 use crate::studio::Studio;
-use crate::toolchains::Toolchains;
+use crate::toolchains::{Godot, Toolchains};
 
 pub const BUILDS_CHANGED: &str = "builds-changed";
 const BUILD_TIMEOUT: Duration = Duration::from_secs(3 * 60 * 60);
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
+const IMPORT_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const PLAY_GRACE: Duration = Duration::from_secs(2 * 60);
+const REVIEW_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const PULSE_INTERVAL: Duration = Duration::from_secs(2);
 const FLUSH_INTERVAL: Duration = Duration::from_millis(800);
 const TOOLCHAIN_TTL: Duration = Duration::from_secs(30);
 const TAIL_LINES: usize = 60;
@@ -50,6 +60,7 @@ pub struct Builder {
     worker: AtomicBool,
     cancelling: Mutex<HashSet<i64>>,
     stopping: Mutex<HashSet<i64>>,
+    halting: Mutex<HashSet<i64>>,
     advanced: Mutex<HashSet<i64>>,
     toolchains: Mutex<Option<(Instant, Arc<Toolchains>)>>,
 }
@@ -58,6 +69,25 @@ pub struct Builder {
 enum AfterCode {
     Stop,
     BuildPlanned,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AfterTest {
+    Stop,
+    BuildPlanned,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Feed {
+    Code,
+    Playtest,
+}
+
+struct Bench<'a> {
+    project_id: i64,
+    godot: &'a Godot,
+    source: &'a Path,
+    log: Arc<Mutex<Option<File>>>,
 }
 
 struct ProjectDirs {
@@ -75,6 +105,7 @@ enum Failure {
 pub enum Folder {
     Source,
     Builds,
+    Playtest,
 }
 
 impl Builder {
@@ -94,6 +125,7 @@ impl Builder {
             worker: AtomicBool::new(false),
             cancelling: Mutex::new(HashSet::new()),
             stopping: Mutex::new(HashSet::new()),
+            halting: Mutex::new(HashSet::new()),
             advanced: Mutex::new(HashSet::new()),
             toolchains: Mutex::new(None),
         }
@@ -136,6 +168,7 @@ impl Builder {
             builds: self.store.builds(project_id)?,
             output_dir: dirs.builds.to_string_lossy().into_owned(),
             planned: self.store.plan(project_id).unwrap_or_default(),
+            playtest: self.playtest_overview(&project, &tools),
         })
     }
 
@@ -151,6 +184,9 @@ impl Builder {
         let project = self.project(project_id)?;
         if !recipes::marker_present(project.engine, &path) {
             return Err(BuildError::SourceInvalid);
+        }
+        if self.store.playtest_active(project_id)? {
+            return Err(BuildError::PlaytestBusy);
         }
         self.store.link_source(project_id, &path, project.engine)?;
         self.notify();
@@ -259,6 +295,9 @@ impl Builder {
         if !source.path.is_dir() || !recipes::marker_present(project.engine, &source.path) {
             return Err(BuildError::SourceInvalid);
         }
+        if self.store.playtest_active(project_id)? {
+            return Err(BuildError::PlaytestBusy);
+        }
         let tools = self.toolchains(false);
         if let Some(blocked) = chosen
             .iter()
@@ -308,6 +347,11 @@ impl Builder {
         let path = match folder {
             Folder::Source => self.store.source(project_id)?.ok_or(BuildError::NoSource)?.path,
             Folder::Builds => self.dirs(&project).builds,
+            Folder::Playtest => self
+                .store
+                .playtest(project_id)?
+                .map(|stored| stored.run_dir)
+                .unwrap_or_else(|| self.dirs(&project).work.join(playtest::PLAYTEST_DIR)),
         };
         std::fs::create_dir_all(&path).map_err(|error| BuildError::Process(error.to_string()))?;
         Ok(path)
@@ -336,6 +380,9 @@ impl Builder {
         after: AfterCode,
     ) -> Result<(), BuildError> {
         self.studio.require_connection().map_err(BuildError::Claude)?;
+        if self.store.playtest_active(project_id)? {
+            return Err(BuildError::PlaytestBusy);
+        }
         let detail = self.studio.store.detail(project_id).map_err(studio_failure)?;
         let project = detail.project.clone();
         let dirs = self.dirs(&project);
@@ -347,11 +394,8 @@ impl Builder {
                 (source.path, source.origin)
             });
         std::fs::create_dir_all(&path).map_err(|error| BuildError::Process(error.to_string()))?;
-        let art_guide = self
-            .studio
-            .enabled_skill(ART_SKILL)
-            .map(|skill| skill.to_skill_markdown());
-        codegen::write_brief(&dirs.brief, &detail, art_guide.as_deref()).map_err(BuildError::Process)?;
+        playtest::uninstall(&path);
+        self.prepare_brief(&detail, &dirs).map_err(BuildError::Process)?;
         let fresh = !recipes::marker_present(project.engine, &path);
         self.store
             .begin_generation(project_id, &path, origin, project.engine)?;
@@ -378,10 +422,329 @@ impl Builder {
             }
             builder.notify();
             if error.is_none() && after == AfterCode::BuildPlanned {
+                builder.after_code(project_id);
+            }
+        });
+        Ok(())
+    }
+
+    fn prepare_brief(&self, detail: &ProjectDetail, dirs: &ProjectDirs) -> Result<(), String> {
+        let art_guide = self
+            .studio
+            .enabled_skill(ART_SKILL)
+            .map(|skill| skill.to_skill_markdown());
+        codegen::write_brief(&dirs.brief, detail, art_guide.as_deref())?;
+        codegen::write_build_skills(&dirs.brief, &self.studio.agent_skills())?;
+        if let Some(found) = self
+            .app
+            .try_state::<Arc<Hunter>>()
+            .and_then(|hunter| hunter.brief(detail.project.id))
+        {
+            recipes::write_file(&dirs.brief.join(codegen::FOUND_ASSETS), found.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    pub fn playtest(self: &Arc<Self>, project_id: i64) -> Result<(), BuildError> {
+        self.start_playtest(project_id, AfterTest::Stop)
+    }
+
+    pub fn stop_playtest(&self, project_id: i64) {
+        if let Ok(mut halting) = self.halting.lock() {
+            halting.insert(project_id);
+        }
+    }
+
+    fn after_code(self: &Arc<Self>, project_id: i64) {
+        if let Err(problem) = self.start_playtest(project_id, AfterTest::BuildPlanned) {
+            self.journal(
+                project_id,
+                JournalEvent::PlaytestSkipped {
+                    reason: skip_reason(problem),
+                },
+            );
+            self.build_planned(project_id);
+        }
+    }
+
+    fn start_playtest(self: &Arc<Self>, project_id: i64, after: AfterTest) -> Result<(), BuildError> {
+        let detail = self.studio.store.detail(project_id).map_err(studio_failure)?;
+        let tools = self.toolchains(true);
+        playtest_tool(&detail.project, &tools).map_err(BuildError::PlaytestUnavailable)?;
+        let source = self.store.source(project_id)?.ok_or(BuildError::NoSource)?;
+        if source.status == SourceStatus::Generating {
+            return Err(BuildError::SourceBusy);
+        }
+        if !source.path.is_dir() || !recipes::marker_present(detail.project.engine, &source.path) {
+            return Err(BuildError::SourceInvalid);
+        }
+        if self.store.has_active_builds(project_id)? {
+            return Err(BuildError::PlaytestUnavailable(
+                "Зараз збираються білди — запусти плейтест, коли вони закінчаться.".to_owned(),
+            ));
+        }
+        self.studio.require_connection().map_err(BuildError::Claude)?;
+        let dirs = self.dirs(&detail.project);
+        let runs = dirs.work.join(playtest::PLAYTEST_DIR);
+        let run = runs.join(format!("run-{}", unix_now()));
+        self.store.begin_playtest(project_id, &run)?;
+        let _ = std::fs::remove_dir_all(&runs);
+        if let Ok(mut halting) = self.halting.lock() {
+            halting.remove(&project_id);
+        }
+        self.journal(project_id, JournalEvent::PlaytestStarted);
+        self.notify();
+        let builder = Arc::clone(self);
+        std::thread::spawn(move || {
+            let outcome = builder.run_playtest(&detail, &source.path, &dirs, &run, &tools);
+            let event = match &outcome {
+                Ok(report) => {
+                    let _ = builder.store.finish_playtest(project_id, Some(report), None);
+                    JournalEvent::PlaytestDone {
+                        verdict: report.verdict,
+                        fixed: u32::try_from(report.fixed()).unwrap_or(u32::MAX),
+                        open: u32::try_from(report.open()).unwrap_or(u32::MAX),
+                    }
+                }
+                Err(reason) => {
+                    let _ = builder.store.finish_playtest(project_id, None, Some(reason));
+                    JournalEvent::PlaytestFailed { reason: reason.clone() }
+                }
+            };
+            builder.journal(project_id, event);
+            if let Ok(mut halting) = builder.halting.lock() {
+                halting.remove(&project_id);
+            }
+            builder.notify();
+            if after == AfterTest::BuildPlanned {
                 builder.build_planned(project_id);
             }
         });
         Ok(())
+    }
+
+    fn run_playtest(
+        self: &Arc<Self>,
+        detail: &ProjectDetail,
+        source: &Path,
+        dirs: &ProjectDirs,
+        run: &Path,
+        tools: &Toolchains,
+    ) -> Result<PlaytestReport, String> {
+        let project_id = detail.project.id;
+        let godot = playtest_tool(&detail.project, tools)?;
+        std::fs::create_dir_all(run).map_err(|error| format!("Не вдалося створити {}: {error}", run.display()))?;
+        self.prepare_brief(detail, dirs)?;
+        let _bot = Installed::new(source)?;
+        let bench = Bench {
+            project_id,
+            godot,
+            source,
+            log: Arc::new(Mutex::new(open_log(&run.join(playtest::GODOT_LOG)))),
+        };
+        let first = run.join(playtest::FIRST_ROUND);
+        let errors = self.play_round(&bench, &first)?;
+        self.store
+            .set_playtest_status(project_id, PlaytestStatus::Reviewing)
+            .map_err(|problem| problem.to_string())?;
+        self.notify();
+        self.review(detail, &bench, dirs, run, &first, &errors)?;
+        self.store
+            .set_playtest_status(project_id, PlaytestStatus::Capturing)
+            .map_err(|problem| problem.to_string())?;
+        self.notify();
+        let last = run.join(playtest::FINAL_ROUND);
+        self.play_round(&bench, &last)?;
+        Ok(playtest::settle(
+            playtest::read_verdict(run),
+            playtest::read_manifest(&last).as_ref(),
+        ))
+    }
+
+    fn play_round(&self, bench: &Bench<'_>, round: &Path) -> Result<Vec<String>, String> {
+        let project_id = bench.project_id;
+        std::fs::create_dir_all(round).map_err(|error| format!("Не вдалося створити {}: {error}", round.display()))?;
+        let collector = Arc::new(Mutex::new(ErrorLog::default()));
+        match self.godot_step(bench, playtest::import_args(bench.source), None, IMPORT_TIMEOUT) {
+            Err(RunFailure::Cancelled) => return Err(PLAYTEST_HALTED.to_owned()),
+            Err(RunFailure::Spawn(error)) => return Err(format!("Не вдалося запустити Godot: {error}")),
+            _ => {}
+        }
+        self.store
+            .set_playtest_round(project_id, round, &[])
+            .map_err(|problem| problem.to_string())?;
+        self.notify();
+        let play = playtest::play_args(bench.source, round, playtest::PLAY_SECONDS);
+        let limit = Duration::from_secs(u64::from(playtest::PLAY_SECONDS)) + PLAY_GRACE;
+        let outcome = self.godot_step(bench, play, Some(&collector), limit);
+        let note = match outcome {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("Гра завершилась з помилкою: {}", recipes::exit_message(status.code()))),
+            Err(RunFailure::TimedOut) => Some("Гра зависла: бот не дограв вчасно, і студія зупинила процес.".to_owned()),
+            Err(RunFailure::Cancelled) => return Err(PLAYTEST_HALTED.to_owned()),
+            Err(failure) => return Err(format!("Godot: {}", recipes::failure_message(&failure))),
+        };
+        let errors = collector
+            .lock()
+            .map(|mut collected| {
+                if let Some(note) = note {
+                    collected.note(note);
+                }
+                collected.errors()
+            })
+            .unwrap_or_default();
+        self.store
+            .set_playtest_round(project_id, round, &errors)
+            .map_err(|problem| problem.to_string())?;
+        self.notify();
+        Ok(errors)
+    }
+
+    fn godot_step(
+        &self,
+        bench: &Bench<'_>,
+        args: Vec<OsString>,
+        errors: Option<&Arc<Mutex<ErrorLog>>>,
+        timeout: Duration,
+    ) -> Result<ExitStatus, RunFailure> {
+        let project_id = bench.project_id;
+        let mut command = Command::new(&bench.godot.exe);
+        command.args(args).current_dir(bench.source);
+        let file = Arc::clone(&bench.log);
+        let collector = errors.cloned();
+        let sink: LineSink = Arc::new(move |line: String| {
+            if let Ok(mut file) = file.lock()
+                && let Some(file) = file.as_mut()
+            {
+                let _ = writeln!(file, "{line}");
+            }
+            if let Some(collector) = &collector
+                && let Ok(mut collector) = collector.lock()
+            {
+                collector.push(&line);
+            }
+        });
+        let pulse = Mutex::new(Instant::now());
+        process::stream(
+            command,
+            None,
+            sink,
+            drop,
+            || {
+                if let Ok(mut beat) = pulse.lock()
+                    && beat.elapsed() >= PULSE_INTERVAL
+                {
+                    *beat = Instant::now();
+                    self.notify();
+                }
+                self.halted(project_id)
+            },
+            timeout,
+        )
+    }
+
+    fn review(
+        self: &Arc<Self>,
+        detail: &ProjectDetail,
+        bench: &Bench<'_>,
+        dirs: &ProjectDirs,
+        run: &Path,
+        first: &Path,
+        errors: &[String],
+    ) -> Result<(), String> {
+        let executable = claude_code::locate().ok_or("Claude Code не знайдено — встанови його в Налаштуваннях.")?;
+        let project_id = detail.project.id;
+        let source = bench.source;
+        let review = playtest::Review {
+            title: &detail.project.name,
+            version: bench.godot.short_version(),
+            godot: &bench.godot.exe,
+            brief: &dirs.brief,
+            run,
+            first,
+        };
+        let mut command = Command::new(executable);
+        command
+            .args(codegen::arguments(&dirs.work, &playtest::system_prompt(&review)))
+            .current_dir(source);
+        for variable in claude_code::SHADOWING_CREDENTIALS {
+            command.env_remove(variable);
+        }
+        let journal = Arc::new(Journal::open(
+            &run.join(playtest::REVIEW_LOG),
+            project_id,
+            Feed::Playtest,
+            Arc::clone(&self.store),
+            self.app.clone(),
+        ));
+        journal.note("Claude переглядає кадри першого прогону".to_owned());
+        let reader = Arc::clone(&journal);
+        let base = source.to_path_buf();
+        let sink: LineSink = Arc::new(move |line: String| reader.consume(&line, &base));
+        let manifest = playtest::read_manifest(first);
+        let outcome = process::stream(
+            command,
+            Some(playtest::task_message(&review, manifest.as_ref(), errors)),
+            sink,
+            drop,
+            || self.halted(project_id),
+            REVIEW_TIMEOUT,
+        );
+        let result = claude_result(
+            outcome,
+            journal.verdict(),
+            PLAYTEST_HALTED,
+            "Claude перевіряв гру задовго — плейтест зупинено.",
+        );
+        journal.note(match &result {
+            Ok(()) => "✓ Claude закінчив перевірку — бот грає фінальний прогін".to_owned(),
+            Err(message) => format!("✕ {message}"),
+        });
+        journal.flush();
+        result
+    }
+
+    fn halted(&self, project_id: i64) -> bool {
+        self.halting.lock().is_ok_and(|halting| halting.contains(&project_id))
+    }
+
+    fn playtest_overview(&self, project: &Project, tools: &Toolchains) -> PlaytestOverview {
+        PlaytestOverview {
+            blocked: playtest_tool(project, tools).err(),
+            run: self
+                .store
+                .playtest(project.id)
+                .ok()
+                .flatten()
+                .map(|stored| self.public_playtest(project.id, stored)),
+        }
+    }
+
+    fn public_playtest(&self, project_id: i64, stored: StoredPlaytest) -> Playtest {
+        let manifest = stored.round_dir.as_deref().and_then(playtest::read_manifest);
+        let shots = match (&stored.round_dir, &manifest) {
+            (Some(dir), Some(manifest)) => {
+                let _ = self.app.asset_protocol_scope().allow_directory(dir, false);
+                playtest::shots(dir, manifest, playtest::asset_link)
+            }
+            _ => Vec::new(),
+        };
+        let finished_early = stored.status != PlaytestStatus::Capturing
+            && stored.round_dir.is_some()
+            && manifest.as_ref().is_none_or(|manifest| !manifest.finished);
+        Playtest {
+            project_id,
+            status: stored.status,
+            report: stored.report,
+            shots,
+            scenes: manifest.map(|manifest| manifest.scenes).unwrap_or_default(),
+            errors: stored.errors,
+            activity: stored.activity,
+            finished_early,
+            error: stored.error,
+            started_at: stored.started_at,
+            finished_at: stored.finished_at,
+        }
     }
 
     fn run_generation(
@@ -398,6 +761,10 @@ impl Builder {
             .app
             .try_state::<Arc<Forge>>()
             .and_then(|forge| forge.art_api());
+        let motion_api = self
+            .app
+            .try_state::<Arc<Mixamo>>()
+            .and_then(|mixamo| mixamo.motion_api());
         let assignment = Assignment {
             engine: project.engine,
             names: &names,
@@ -408,6 +775,8 @@ impl Builder {
             project_id: project.id,
             art_api: art_api.as_deref(),
             art_guide: dirs.brief.join(codegen::ART_GUIDE).is_file(),
+            motion_api: motion_api.as_deref(),
+            build_skills: dirs.brief.join(codegen::BUILD_SKILLS).is_dir(),
         };
         let mut command = Command::new(executable);
         command
@@ -419,6 +788,7 @@ impl Builder {
         let journal = Arc::new(Journal::open(
             &dirs.work.join(GENERATION_LOG),
             project.id,
+            Feed::Code,
             Arc::clone(&self.store),
             self.app.clone(),
         ));
@@ -439,18 +809,12 @@ impl Builder {
             || self.stopping.lock().is_ok_and(|stopping| stopping.contains(&project_id)),
             GENERATION_TIMEOUT,
         );
-        let verdict = journal.verdict();
-        let result = match outcome {
-            Err(RunFailure::Cancelled) => Err("Генерацію зупинено.".to_owned()),
-            Err(RunFailure::TimedOut) => Err("Claude працював задовго — генерацію зупинено.".to_owned()),
-            Err(failure) => Err(format!("Claude Code: {}", recipes::failure_message(&failure))),
-            Ok(status) => match verdict {
-                Some(Err(message)) => Err(message),
-                Some(Ok(())) => Ok(()),
-                None if status.success() => Err("Claude Code завершився без результату.".to_owned()),
-                None => Err(format!("Claude Code: {}", recipes::exit_message(status.code()))),
-            },
-        };
+        let result = claude_result(
+            outcome,
+            journal.verdict(),
+            "Генерацію зупинено.",
+            "Claude працював задовго — генерацію зупинено.",
+        );
         let result = result.and_then(|()| {
             if recipes::marker_present(project.engine, root) {
                 Ok(())
@@ -516,6 +880,9 @@ impl Builder {
             .ok()
             .flatten()
             .ok_or_else(|| Failure::Error("У проєкту немає коду гри".into()))?;
+        if !self.store.playtest_active(project.id).unwrap_or(false) {
+            playtest::uninstall(&source.path);
+        }
         let tools = self.toolchains(true);
         let names = GameNames::new(&project.name);
         let dirs = self.dirs(&project);
@@ -614,6 +981,48 @@ impl Builder {
             *slot = Some((Instant::now(), Arc::clone(&fresh)));
         }
         fresh
+    }
+}
+
+const PLAYTEST_HALTED: &str = "Плейтест зупинено.";
+
+fn playtest_tool<'a>(project: &Project, tools: &'a Toolchains) -> Result<&'a Godot, String> {
+    if project.engine != GameEngine::Godot {
+        return Err(format!(
+            "Плейтест поки грає лише в ігри на Godot, а ця — на {}.",
+            project.engine.label()
+        ));
+    }
+    tools
+        .godot
+        .as_ref()
+        .ok_or_else(|| "Godot не знайдено — встанови Godot 4, щоб бот міг зіграти в гру.".to_owned())
+}
+
+fn skip_reason(problem: BuildError) -> String {
+    match problem {
+        BuildError::PlaytestUnavailable(reason) => reason,
+        BuildError::Claude(_) => "Claude Code не підключено до підписки — увійди в Налаштуваннях.".to_owned(),
+        other => format!("не вдалося запустити ({other})"),
+    }
+}
+
+fn claude_result(
+    outcome: Result<ExitStatus, RunFailure>,
+    verdict: Option<Result<(), String>>,
+    cancelled: &str,
+    timed_out: &str,
+) -> Result<(), String> {
+    match outcome {
+        Err(RunFailure::Cancelled) => Err(cancelled.to_owned()),
+        Err(RunFailure::TimedOut) => Err(timed_out.to_owned()),
+        Err(failure) => Err(format!("Claude Code: {}", recipes::failure_message(&failure))),
+        Ok(status) => match verdict {
+            Some(Err(message)) => Err(message),
+            Some(Ok(())) => Ok(()),
+            None if status.success() => Err("Claude Code завершився без результату.".to_owned()),
+            None => Err(format!("Claude Code: {}", recipes::exit_message(status.code()))),
+        },
     }
 }
 
@@ -731,10 +1140,11 @@ struct Journal {
     store: Arc<BuildStore>,
     app: AppHandle,
     project_id: i64,
+    feed: Feed,
 }
 
 impl Journal {
-    fn open(path: &Path, project_id: i64, store: Arc<BuildStore>, app: AppHandle) -> Self {
+    fn open(path: &Path, project_id: i64, feed: Feed, store: Arc<BuildStore>, app: AppHandle) -> Self {
         Self {
             state: Mutex::new(JournalState {
                 file: open_log(path),
@@ -746,7 +1156,16 @@ impl Journal {
             store,
             app,
             project_id,
+            feed,
         }
+    }
+
+    fn save(&self, activity: &[String]) {
+        let _ = match self.feed {
+            Feed::Code => self.store.set_activity(self.project_id, activity),
+            Feed::Playtest => self.store.set_playtest_activity(self.project_id, activity),
+        };
+        let _ = self.app.emit(BUILDS_CHANGED, ());
     }
 
     fn consume(&self, line: &str, root: &Path) {
@@ -771,8 +1190,7 @@ impl Journal {
             state.flushed = Instant::now();
             let activity = state.activity.clone();
             drop(state);
-            let _ = self.store.set_activity(self.project_id, &activity);
-            let _ = self.app.emit(BUILDS_CHANGED, ());
+            self.save(&activity);
         }
     }
 
@@ -800,8 +1218,7 @@ impl Journal {
             }
             Err(_) => return,
         };
-        let _ = self.store.set_activity(self.project_id, &activity);
-        let _ = self.app.emit(BUILDS_CHANGED, ());
+        self.save(&activity);
     }
 }
 
@@ -816,6 +1233,43 @@ mod tests {
         assert_eq!(clipped.chars().count(), MAX_LINE_CHARS);
         assert!(clipped.ends_with('…'));
         assert_eq!(clip_line("short"), "short");
+    }
+
+    #[test]
+    fn plays_only_godot_games_with_godot_installed() {
+        let mut project = Project {
+            id: 1,
+            name: "Шлях Тіні".into(),
+            prompt: "Стелс".into(),
+            pitch: String::new(),
+            engine: GameEngine::Unity,
+            status: noctics_shared::ProjectStatus::Ready,
+            style: noctics_shared::StyleGuide::default(),
+            references: Vec::new(),
+            analysis: noctics_shared::PromptAnalysis::default(),
+            cover_screen_id: None,
+            cover_html: None,
+            screen_count: 0,
+            approved_count: 0,
+            pending_count: 0,
+            error: None,
+            created_at: 0,
+        };
+        let mut tools = Toolchains::default();
+        assert!(playtest_tool(&project, &tools).unwrap_err().contains("Unity"));
+        project.engine = GameEngine::Godot;
+        assert!(playtest_tool(&project, &tools).unwrap_err().contains("Godot не знайдено"));
+        tools.godot = Some(Godot {
+            exe: PathBuf::from("godot.exe"),
+            version: "4.7.stable".into(),
+            templates: true,
+        });
+        assert_eq!(playtest_tool(&project, &tools).unwrap().exe, PathBuf::from("godot.exe"));
+        assert_eq!(
+            skip_reason(BuildError::PlaytestUnavailable("немає Godot".into())),
+            "немає Godot"
+        );
+        assert!(skip_reason(BuildError::Claude(StudioError::UsageLimit)).contains("Claude Code"));
     }
 
     #[test]

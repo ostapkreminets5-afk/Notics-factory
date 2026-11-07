@@ -6,6 +6,7 @@ use crate::bridge::{command_error, invoke};
 
 pub const SOURCE_FOLDER: &str = "source";
 pub const BUILDS_FOLDER: &str = "builds";
+pub const PLAYTEST_FOLDER: &str = "playtest";
 
 #[derive(Serialize)]
 struct NoArgs {}
@@ -116,6 +117,18 @@ pub async fn open_log(id: i64) -> Result<(), BuildError> {
 
 pub async fn open_folder(project_id: i64, folder: &str) -> Result<(), BuildError> {
     invoke("open_game_folder", &FolderArgs { project_id, folder })
+        .await
+        .map_err(build_error)
+}
+
+pub async fn start_playtest(project_id: i64) -> Result<BuildOverview, BuildError> {
+    invoke("start_playtest", &ProjectArgs { project_id })
+        .await
+        .map_err(build_error)
+}
+
+pub async fn stop_playtest(project_id: i64) -> Result<(), BuildError> {
+    invoke("stop_playtest", &ProjectArgs { project_id })
         .await
         .map_err(build_error)
 }

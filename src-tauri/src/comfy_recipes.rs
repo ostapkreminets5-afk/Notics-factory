@@ -85,6 +85,20 @@ const PIXAL_NODES: [&str; 7] = [
     "BakeNormalMapFromMesh",
     "BakeAmbientOcclusion",
 ];
+const ULTRATEX_NODES: [&str; 12] = [
+    "LoadImage",
+    "LoadBackgroundRemovalModel",
+    "RemoveBackground",
+    "UNETLoader",
+    "CLIPLoader",
+    "VAELoader",
+    "CLIPTextEncode",
+    "UltraTexLoraLoader",
+    "UltraTexForegroundDecoder",
+    "UltraTexPrep",
+    "UltraTexSampler",
+    "UltraTexBake",
+];
 const PRECISIONS: [&str; 10] = [
     "nvfp4", "fp4", "int8", "fp8", "bf16", "fp16", "fp32", "gguf", "q8", "q4",
 ];
@@ -97,6 +111,10 @@ const NEGATIVE_FALLBACK: &str = "lowres, blurry, jpeg artifacts, watermark, sign
 const DEFAULT_KEYSCALE: &str = "C minor";
 const MESH_FACES: u32 = 30_000;
 const MESH_TEXTURE: u32 = 2048;
+const ULTRATEX_VIEW_SIZE: u32 = 1024;
+const ULTRATEX_RENDER_SIZE: u32 = 2048;
+const ULTRATEX_STEPS: u32 = 25;
+const ULTRATEX_GUIDANCE: f64 = 2.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recipe {
@@ -146,6 +164,14 @@ pub enum Recipe {
         matting: String,
         geometry: String,
     },
+    UltraTex {
+        unet: String,
+        clip: String,
+        vae: String,
+        lora: String,
+        decoder: String,
+        matting: String,
+    },
 }
 
 impl Recipe {
@@ -158,7 +184,12 @@ impl Recipe {
             Self::StableAudio { .. } => "stable-audio",
             Self::Trellis { .. } => "trellis",
             Self::Pixal { .. } => "pixal3d",
+            Self::UltraTex { .. } => "ultratex",
         }
+    }
+
+    pub fn needs_mesh(&self) -> bool {
+        matches!(self, Self::UltraTex { .. })
     }
 }
 
@@ -222,6 +253,7 @@ pub struct Brief<'a> {
     pub prefix: &'a str,
     pub matting: Option<&'a str>,
     pub reference: Option<&'a str>,
+    pub mesh: Option<&'a str>,
 }
 
 pub fn roster(inventory: &Inventory) -> Vec<Candidate> {
@@ -256,6 +288,13 @@ pub fn roster(inventory: &Inventory) -> Vec<Candidate> {
         };
         found.extend(candidate.map(|candidate| with_precision(candidate, &name)));
     }
+    found.extend(
+        inventory
+            .in_folder(Folder::Loras)
+            .iter()
+            .filter(|lora| is_ultratex_albedo(&base(lora)))
+            .map(|lora| ultratex(inventory, lora)),
+    );
     found.sort_by(|left, right| {
         medium_order(left.medium)
             .cmp(&medium_order(right.medium))
@@ -301,6 +340,14 @@ fn is_ace(name: &str) -> bool {
 
 fn is_stable_audio_open(name: &str) -> bool {
     (name.contains("stable_audio") || name.contains("stable-audio")) && name.contains("open")
+}
+
+fn is_ultratex_albedo(name: &str) -> bool {
+    name.contains("ultratex") && !name.contains("_mr") && !name.contains("flux1")
+}
+
+fn is_klein_base_9b(name: &str) -> bool {
+    is_flux2_klein(name) && name.contains("base") && name.contains("9b")
 }
 
 fn precision(name: &str) -> Option<&'static str> {
@@ -613,6 +660,40 @@ fn pixal(inventory: &Inventory, unet: &str) -> Candidate {
     )
 }
 
+fn ultratex(inventory: &Inventory, lora: &str) -> Candidate {
+    let mut needs = Needs::new(inventory);
+    let unet = needs.file(Folder::DiffusionModels, "flux-2-klein-base-9b (diffusion model)", is_klein_base_9b);
+    let clip = needs.file(Folder::TextEncoders, "qwen_3_8b (text encoder)", |file| {
+        file.contains("qwen_3_8b") || file.contains("qwen3_8b")
+    });
+    let vae = needs.file(Folder::Vae, "flux2-vae (VAE)", |file| {
+        file.contains("flux2") || file.contains("flux-2") || file.contains("flux_2")
+    });
+    let decoder = needs.file(Folder::UltraTex, "ultratex flux2 decoder.pt", |file| {
+        file.ends_with(".pt") && (file.contains("ultratex") || file.contains("decoder")) && !file.contains("flux1")
+    });
+    let matting = needs.any(Folder::BackgroundRemoval, "birefnet (background removal)", "birefnet");
+    needs.nodes(&[&ULTRATEX_NODES]);
+    let precision = precision(&base(&unet)).map(str::to_owned);
+    let mut candidate = needs.finish(
+        format!("ultratex:{lora}"),
+        "UltraTex".to_owned(),
+        "Перетекстурує меш TRELLIS/Pixal3D · FLUX.2 9B".to_owned(),
+        Medium::Mesh,
+        2,
+        Recipe::UltraTex {
+            unet,
+            clip,
+            vae,
+            lora: lora.to_owned(),
+            decoder,
+            matting,
+        },
+    );
+    candidate.precision = precision;
+    candidate
+}
+
 struct Graph {
     nodes: Map<String, Value>,
 }
@@ -693,6 +774,14 @@ pub fn graph(recipe: &Recipe, brief: &Brief<'_>) -> Value {
             matting,
             geometry,
         } => pixal_graph(unet, shape, texture, vision, matting, geometry, brief),
+        Recipe::UltraTex {
+            unet,
+            clip,
+            vae,
+            lora,
+            decoder,
+            matting,
+        } => ultratex_graph(unet, clip, vae, lora, decoder, matting, brief),
     }
 }
 
@@ -1145,6 +1234,68 @@ fn pixal_graph(
     graph.done()
 }
 
+fn ultratex_graph(
+    unet: &str,
+    clip: &str,
+    vae: &str,
+    lora: &str,
+    decoder: &str,
+    matting: &str,
+    brief: &Brief<'_>,
+) -> Value {
+    let mut graph = Graph::new();
+    graph.add("image", "LoadImage", json!({ "image": brief.reference.unwrap_or_default() }));
+    graph.add("matting", "LoadBackgroundRemovalModel", json!({ "bg_removal_name": matting }));
+    graph.add(
+        "mask",
+        "RemoveBackground",
+        json!({ "bg_removal_model": link("matting", 0), "image": link("image", 0) }),
+    );
+    graph.add("unet", "UNETLoader", json!({ "unet_name": unet, "weight_dtype": "default" }));
+    graph.add(
+        "lora",
+        "UltraTexLoraLoader",
+        json!({ "model": link("unet", 0), "lora_name": lora, "strength": 1.0 }),
+    );
+    graph.add("clip", "CLIPLoader", json!({ "clip_name": clip, "type": "flux2", "device": "default" }));
+    graph.add("positive", "CLIPTextEncode", json!({ "clip": link("clip", 0), "text": "" }));
+    graph.add("vae", "VAELoader", json!({ "vae_name": vae }));
+    graph.add(
+        "decoder",
+        "UltraTexForegroundDecoder",
+        json!({ "vae": link("vae", 0), "decoder_name": decoder }),
+    );
+    graph.add(
+        "prep",
+        "UltraTexPrep",
+        json!({
+            "reference_image": link("image", 0), "mesh_path": brief.mesh.unwrap_or_default(),
+            "render_size": ULTRATEX_RENDER_SIZE, "atlas_size": MESH_TEXTURE, "uv_mode": "comfy_gpu",
+            "reference_alignment": "fit_front_silhouette", "mask_meaning": "foreground",
+            "reference_mask": link("mask", 0)
+        }),
+    );
+    graph.add(
+        "sample",
+        "UltraTexSampler",
+        json!({
+            "model": link("lora", 0), "vae": link("decoder", 0), "positive": link("positive", 0),
+            "prep": link("prep", 0), "resolution": ULTRATEX_VIEW_SIZE, "steps": ULTRATEX_STEPS,
+            "seed": brief.seed, "guidance": ULTRATEX_GUIDANCE, "drop_background_tokens": true
+        }),
+    );
+    graph.add(
+        "save",
+        "UltraTexBake",
+        json!({
+            "prep": link("prep", 0), "albedo_views": link("sample", 0), "texture_size": MESH_TEXTURE,
+            "filename_prefix": brief.prefix, "view_weight_power": 4.0, "best_view_mix": 0.5,
+            "edge_feather_px": 6.0
+        }),
+    );
+    graph.done()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1261,7 +1412,76 @@ mod tests {
             prefix: "noctics/1/z_image",
             matting,
             reference,
+            mesh: None,
         }
+    }
+
+    fn with_ultratex(mut inventory: Inventory) -> Inventory {
+        inventory
+            .files
+            .get_mut(&Folder::DiffusionModels)
+            .unwrap()
+            .push("flux-2-klein-base-9b-fp8.safetensors".to_owned());
+        inventory
+            .files
+            .get_mut(&Folder::TextEncoders)
+            .unwrap()
+            .push("qwen_3_8b_fp4mixed.safetensors".to_owned());
+        inventory.files.insert(
+            Folder::Loras,
+            vec!["ultratex_flux2.safetensors".to_owned(), "ultratex_flux2_mr.safetensors".to_owned()],
+        );
+        inventory.files.insert(
+            Folder::UltraTex,
+            vec!["flux2-vae.safetensors".to_owned(), "ultratex_flux2_decoder.pt".to_owned()],
+        );
+        inventory
+    }
+
+    #[test]
+    fn ultratex_retextures_the_mesh_of_another_model() {
+        let roster = roster(&with_ultratex(this_machine()));
+        let meshes: Vec<&str> = roster
+            .iter()
+            .filter(|candidate| candidate.medium == Medium::Mesh)
+            .map(|candidate| candidate.name.as_str())
+            .collect();
+        assert_eq!(meshes, vec!["TRELLIS.2", "Pixal3D", "UltraTex"]);
+        assert!(roster.iter().any(|candidate| candidate.name == "FLUX.2 Klein 9B Base" && candidate.ready()));
+        let ultratex = roster.iter().find(|candidate| candidate.name == "UltraTex").unwrap();
+        assert!(ultratex.ready(), "{:?}", ultratex.missing);
+        assert_eq!(ultratex.precision.as_deref(), Some("fp8"));
+        let recipe = ultratex.recipe.as_ref().unwrap();
+        assert!(recipe.needs_mesh());
+        let mut request = brief(AssetKind::Model, Some("birefnet.safetensors"), Some("noctics/1/ref_00001_.png [output]"));
+        request.mesh = Some("noctics/1/2-0_00001_.glb");
+        let value = graph(recipe, &request);
+        links_resolve(&value);
+        assert_eq!(value["prep"]["inputs"]["mesh_path"], "noctics/1/2-0_00001_.glb");
+        assert_eq!(value["prep"]["inputs"]["mask_meaning"], "foreground");
+        assert_eq!(value["lora"]["inputs"]["lora_name"], "ultratex_flux2.safetensors");
+        assert_eq!(value["decoder"]["inputs"]["decoder_name"], "ultratex_flux2_decoder.pt");
+        assert_eq!(value["clip"]["inputs"]["clip_name"], "qwen_3_8b_fp4mixed.safetensors");
+        assert_eq!(value["save"]["class_type"], "UltraTexBake");
+    }
+
+    #[test]
+    fn ultratex_names_what_it_still_needs() {
+        let mut inventory = this_machine();
+        inventory
+            .files
+            .insert(Folder::Loras, vec!["ultratex_flux2.safetensors".to_owned()]);
+        let roster = roster(&inventory);
+        let ultratex = roster.iter().find(|candidate| candidate.name == "UltraTex").unwrap();
+        assert!(!ultratex.ready());
+        assert_eq!(
+            ultratex.missing,
+            vec![
+                "flux-2-klein-base-9b (diffusion model)",
+                "qwen_3_8b (text encoder)",
+                "ultratex flux2 decoder.pt"
+            ]
+        );
     }
 
     fn classes(graph: &Value) -> Vec<String> {

@@ -3,6 +3,7 @@ use noctics_shared::Session;
 
 use crate::auth::{AuthMode, AuthScreen};
 use crate::titlebar::Titlebar;
+use crate::ui_zoom::UiZoom;
 use crate::workspace::Workspace;
 use crate::{bridge, fonts};
 
@@ -19,6 +20,9 @@ static BUILD_CSS: Asset = asset!("/assets/styles/build.css");
 static ARTIFACTS_CSS: Asset = asset!("/assets/styles/artifacts.css");
 static COMFY_CSS: Asset = asset!("/assets/styles/comfy.css");
 static NODES_CSS: Asset = asset!("/assets/styles/nodes.css");
+static ASSET_HUNT_CSS: Asset = asset!("/assets/styles/asset_hunt.css");
+static MIXAMO_CSS: Asset = asset!("/assets/styles/mixamo.css");
+static UI_ZOOM_CSS: Asset = asset!("/assets/styles/ui_zoom.css");
 
 #[derive(Clone, PartialEq)]
 enum Screen {
@@ -78,9 +82,13 @@ pub fn App() -> Element {
         document::Stylesheet { href: ARTIFACTS_CSS }
         document::Stylesheet { href: COMFY_CSS }
         document::Stylesheet { href: NODES_CSS }
+        document::Stylesheet { href: ASSET_HUNT_CSS }
+        document::Stylesheet { href: MIXAMO_CSS }
+        document::Stylesheet { href: UI_ZOOM_CSS }
         div { class: if in_workspace { "shell is-workspace" } else { "shell" },
             Titlebar { overlay: in_workspace }
             main { class: "stage", {stage} }
         }
+        UiZoom {}
     }
 }

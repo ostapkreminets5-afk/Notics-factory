@@ -4,8 +4,8 @@ use std::rc::Rc;
 use dioxus::prelude::*;
 use dioxus_logger::tracing;
 use noctics_shared::{
-    BuildTarget, GameEngine, MAX_FEEDBACK_CHARS, MAX_PROJECT_NAME_CHARS, MAX_PROMPT_CHARS, MIN_PROMPT_CHARS,
-    OutputStatus, Project, ProjectStatus, ScreenStatus, StudioError, StudioSettings,
+    BuildTarget, CLAUDE_TIMEOUT, GameEngine, MAX_FEEDBACK_CHARS, MAX_PROJECT_NAME_CHARS, MAX_PROMPT_CHARS,
+    MIN_PROMPT_CHARS, OutputStatus, Project, ProjectStatus, ScreenStatus, StudioError, StudioSettings,
 };
 
 use crate::bridge;
@@ -24,6 +24,8 @@ pub enum Section {
     ClaudeDesign,
     Projects,
     Pinterest,
+    AssetHunt,
+    Mixamo,
     Models,
     Build,
     Journal,
@@ -262,6 +264,9 @@ pub fn explain(problem: &StudioError) -> String {
         StudioError::Truncated => "Відповідь Claude обірвалась. Спробуй перегенерувати.".to_owned(),
         StudioError::RateLimited => "Забагато запитів до Claude. Спробуй трохи згодом.".to_owned(),
         StudioError::Overloaded => "Claude зараз перевантажений. Спробуй трохи згодом.".to_owned(),
+        StudioError::Process(detail) if detail == CLAUDE_TIMEOUT => {
+            "Claude не встиг відповісти за 20 хвилин — завдання завелике для однієї відповіді.".to_owned()
+        }
         StudioError::Process(detail) => {
             tracing::warn!("claude code process failed: {detail}");
             "Claude Code не відповів. Перевір інтернет і спробуй ще раз.".to_owned()

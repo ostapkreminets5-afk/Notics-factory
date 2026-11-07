@@ -224,6 +224,25 @@ pub fn ChevronRightIcon() -> Element {
 }
 
 #[component]
+pub fn ChevronLeftIcon() -> Element {
+    rsx! {
+        Glyph { path { d: "m15 6-6 6 6 6" } }
+    }
+}
+
+#[component]
+pub fn ExpandIcon() -> Element {
+    rsx! {
+        Glyph {
+            path { d: "M15 3h6v6" }
+            path { d: "M9 21H3v-6" }
+            path { d: "m21 3-7 7" }
+            path { d: "m3 21 7-7" }
+        }
+    }
+}
+
+#[component]
 pub fn SearchIcon() -> Element {
     rsx! {
         Glyph {
@@ -274,6 +293,15 @@ pub fn TrashIcon() -> Element {
     rsx! {
         Glyph {
             path { d: "M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" }
+        }
+    }
+}
+
+#[component]
+pub fn MotionIcon() -> Element {
+    rsx! {
+        Glyph {
+            path { d: "M22 12h-4l-3 9L9 3l-3 9H2" }
         }
     }
 }

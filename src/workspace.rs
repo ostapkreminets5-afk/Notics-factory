@@ -2,6 +2,7 @@ use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 use noctics_shared::{BuildTarget, GameEngine, MAX_PROMPT_CHARS, Session, StudioError, ToolSlot};
 
+use crate::asset_hunt::{AssetHuntPage, HUNT_NOTE, HUNT_TITLE};
 use crate::bridge;
 use crate::build::BuildPage;
 use crate::comfy::{Comfy, ComfyPage, provide_comfy, use_comfy};
@@ -10,9 +11,10 @@ use crate::engine_switcher::EngineSwitcher;
 use crate::factory_mode::{FactoryMode, ModeSwitch, provide_factory_mode};
 use crate::home::CorePage;
 use crate::journal::JournalPage;
+use crate::mixamo::{Mixamo, MixamoPage, provide_mixamo, use_mixamo};
 use crate::icons::{
-    ArrowRightIcon, BoxIcon, ChevronsIcon, CpuIcon, FolderIcon, GridIcon, ListIcon, LogoMark,
-    PackageIcon, PanelsIcon, RouteIcon, SettingsIcon, SidebarIcon, StarIcon,
+    ArrowRightIcon, BoxIcon, ChevronsIcon, CpuIcon, FolderIcon, GridIcon, ListIcon, LogoMark, MotionIcon,
+    PackageIcon, PanelsIcon, RouteIcon, SearchIcon, SettingsIcon, SidebarIcon, StarIcon,
 };
 use crate::node_factory::NodeFactory;
 use crate::pipeline::PipelineCanvas;
@@ -52,7 +54,7 @@ struct UtilityEntry {
     note: &'static str,
 }
 
-const SYSTEMS: [SystemEntry; 7] = [
+const SYSTEMS: &[SystemEntry] = &[
     SystemEntry {
         section: Section::Core,
         title: "AI-ядро",
@@ -81,6 +83,18 @@ const SYSTEMS: [SystemEntry; 7] = [
         section: Section::Pinterest,
         title: "Pinterest",
         note: "Референси й настрій",
+        badge: Badge::Online,
+    },
+    SystemEntry {
+        section: Section::AssetHunt,
+        title: HUNT_TITLE,
+        note: HUNT_NOTE,
+        badge: Badge::Online,
+    },
+    SystemEntry {
+        section: Section::Mixamo,
+        title: "Mixamo",
+        note: "Анімації персонажів",
         badge: Badge::Online,
     },
     SystemEntry {
@@ -124,6 +138,7 @@ pub fn Workspace(session: Session, on_sign_out: EventHandler<()>) -> Element {
     let studio = provide_studio();
     let tools = provide_tools();
     provide_comfy();
+    provide_mixamo();
     let layout = provide_sidebar_layout();
     let mode = provide_factory_mode();
     if mode.get() == FactoryMode::Nodes {
@@ -160,6 +175,12 @@ pub fn Workspace(session: Session, on_sign_out: EventHandler<()>) -> Element {
         },
         Section::Pinterest => rsx! {
             ReferencesPage {}
+        },
+        Section::AssetHunt => rsx! {
+            AssetHuntPage {}
+        },
+        Section::Mixamo => rsx! {
+            MixamoPage {}
         },
         Section::Journal => rsx! {
             JournalPage {}
@@ -206,6 +227,7 @@ fn Sidebar() -> Element {
 
     let tools = use_tools();
     let comfy = use_comfy();
+    let mixamo = use_mixamo();
     let mut picker = use_signal(|| None::<(ToolSlot, String)>);
     let mut order = use_signal(load_nav_order);
     let mut held = use_signal(|| None::<usize>);
@@ -296,7 +318,7 @@ fn Sidebar() -> Element {
                                 span { class: "nav-note", "{nav_note(entry, studio)}" }
                             }
                             {
-                                match badge_for(entry, studio, comfy, tools) {
+                                match motion_badge(entry.section, mixamo).unwrap_or_else(|| badge_for(entry, studio, comfy, tools)) {
                                     BadgeView::Online => rsx! {
                                         span { class: "nav-dot is-online", title: "Працює" }
                                     },
@@ -445,6 +467,18 @@ fn badge_for(entry: &SystemEntry, studio: Studio, comfy: Comfy, tools: Tools) ->
     }
 }
 
+fn motion_badge(section: Section, mixamo: Mixamo) -> Option<BadgeView> {
+    if section != Section::Mixamo {
+        return None;
+    }
+    let status = mixamo.status();
+    match status.signed_in {
+        Some(false) => Some(BadgeView::Attention),
+        Some(true) if status.working || mixamo.busy() => Some(BadgeView::Busy),
+        _ => None,
+    }
+}
+
 #[component]
 fn NavIcon(section: Section) -> Element {
     match section {
@@ -465,6 +499,12 @@ fn NavIcon(section: Section) -> Element {
         },
         Section::Pinterest => rsx! {
             GridIcon {}
+        },
+        Section::AssetHunt => rsx! {
+            SearchIcon {}
+        },
+        Section::Mixamo => rsx! {
+            MotionIcon {}
         },
         Section::Models => rsx! {
             BoxIcon {}

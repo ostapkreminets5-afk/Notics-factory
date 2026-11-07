@@ -2,27 +2,37 @@ use std::future::Future;
 
 use dioxus::prelude::*;
 use noctics_shared::{
-    AssetTask, BuildOverview, BuildStatus, BuildTarget, GameEngine, MAX_PROMPT_CHARS, Medium, OutputStatus,
-    PinterestStatus, ProjectDetail, Readiness, ScreenStatus, SourceOrigin, SourceStatus, StudioError,
+    AssetTask, BuildOverview, BuildStatus, BuildTarget, DesignVariation, GameEngine, MAX_PROMPT_CHARS, Medium,
+    MotionOrder, OutputStatus,
+    PinterestStatus, ProjectDetail, Readiness, Screen, ScreenStatus, SourceOrigin, SourceStatus, StudioError,
     format_size,
 };
 
+use crate::asset_hunt::FindsPanel;
+use crate::mixamo::AnimationsPanel;
 use crate::build::explain_build;
-use crate::build_bridge::{self, SOURCE_FOLDER};
+use crate::build_bridge::{self, PLAYTEST_FOLDER, SOURCE_FOLDER};
 use crate::bridge;
 use crate::factory_mode::{FactoryMode, use_factory_mode};
-use crate::icons::{CheckIcon, CloseIcon, ExternalIcon, PlusIcon, RefreshIcon};
+use crate::icons::{ArrowRightIcon, CheckIcon, CloseIcon, ExpandIcon, ExternalIcon, PlusIcon, RefreshIcon};
+use crate::inspector_layout::{InspectorResizer, use_inspector_layout};
+use crate::journal::plural;
 use crate::node_graph::{
     Node, NodeId, Phase, Snapshot, build_phase, latest_build, output_phase, run_phase, screen_phase, stage_outputs,
     task_phase,
 };
-use crate::references::explain_pinterest;
+use crate::artstation_bridge;
+use crate::open_design::{OpenDesignPanel, VariationBoard, variation_slides};
+use crate::references::{explain_artstation, explain_pinterest};
+use crate::screen_gallery::{ScreenGallery, Slide};
 use crate::studio::{Section, explain, output_status_label, screen_status_label, use_studio};
 
 const ACTIVITY_LINES: usize = 14;
 const BUILD_LOG_LINES: usize = 6;
 const PIN_PREVIEWS: usize = 4;
 const ASSET_PREVIEWS: usize = 6;
+const MOSAIC_TILES: usize = 6;
+const SCREEN_WORDS: [&str; 3] = ["екран", "екрани", "екранів"];
 
 #[derive(Clone, Copy, PartialEq)]
 struct Actions {
@@ -69,10 +79,42 @@ pub fn NodeInspector(
         busy: Signal::new(None),
         notice: Signal::new(None),
     });
+    let layout = use_inspector_layout();
+    let mut viewing = use_signal(|| None::<i64>);
+    let mut board = use_signal(|| false);
+    let mut variation_open = use_signal(|| None::<usize>);
+    let mut variant_viewing = use_signal(|| None::<i64>);
     let notice = (actions.notice)();
     let phase = node.phase;
     let id = node.id;
     let project_id = snapshot.project_id();
+    let resizing = if layout.resizing() { " is-resizing" } else { "" };
+    let gallery = viewing().zip(
+        snapshot
+            .detail
+            .as_ref()
+            .map(|detail| detail.screens.iter().map(Slide::from_screen).collect::<Vec<Slide>>()),
+    );
+    let board_detail = snapshot.detail.clone().filter(|_| board() && id == NodeId::Screens);
+    let plan_screens: Vec<Screen> = snapshot
+        .detail
+        .as_ref()
+        .map(|detail| detail.screens.clone())
+        .unwrap_or_default();
+    let opened_variation: Option<DesignVariation> = variation_open()
+        .filter(|_| id == NodeId::OpenDesign)
+        .zip(snapshot.open_design.as_ref())
+        .and_then(|(number, design)| {
+            design
+                .variations()
+                .into_iter()
+                .find(|variation| variation.number == number)
+        });
+    let variant_gallery = variant_viewing().zip(
+        opened_variation
+            .as_ref()
+            .map(|variation| variation_slides(variation, &plan_screens)),
+    );
 
     let panel = match (id, &snapshot.detail) {
         (NodeId::Prompt, _) => rsx! {
@@ -93,16 +135,37 @@ pub fn NodeInspector(
             SkillsPanel { detail: detail.clone(), id }
         },
         (NodeId::Screens, Some(detail)) => rsx! {
-            ScreensPanel { detail: detail.clone() }
+            ScreensPanel { detail: detail.clone(), board }
         },
         (NodeId::Code, Some(detail)) => rsx! {
             CodePanel { project_id: detail.project.id, overview: snapshot.overview.clone() }
+        },
+        (NodeId::Finds, Some(detail)) => rsx! {
+            FindsPanel { project_id: detail.project.id, hunt: snapshot.hunt.clone() }
+        },
+        (NodeId::Animations, Some(detail)) => rsx! {
+            AnimationsPanel {
+                project_id: detail.project.id,
+                engine: detail.project.engine,
+                orders: snapshot.project_motions().into_iter().cloned().collect::<Vec<MotionOrder>>(),
+                status: snapshot.mixamo.as_ref().map(|mixamo| mixamo.status.clone()).unwrap_or_default(),
+            }
+        },
+        (NodeId::OpenDesign, Some(detail)) => rsx! {
+            OpenDesignPanel {
+                project_id: detail.project.id,
+                board: snapshot.open_design.clone(),
+                opened: variation_open,
+            }
         },
         (NodeId::Assets, Some(_)) => rsx! {
             AssetsPanel {
                 tasks: snapshot.project_tasks().into_iter().cloned().collect::<Vec<AssetTask>>(),
                 online: snapshot.comfy.as_ref().map(|comfy| comfy.status.online),
             }
+        },
+        (NodeId::Playtest, Some(detail)) => rsx! {
+            PlaytestPanel { project_id: detail.project.id, overview: snapshot.overview.clone() }
         },
         (NodeId::Builds, Some(detail)) => rsx! {
             BuildPanel {
@@ -122,13 +185,14 @@ pub fn NodeInspector(
 
     rsx! {
         aside {
-            class: "nf-inspector {node.tint.tint()}",
+            class: "nf-inspector {node.tint.tint()}{resizing}",
             aria_label: "Вузол «{node.title}»",
             onkeydown: move |event| {
                 if event.key() == Key::Escape {
                     on_close.call(());
                 }
             },
+            InspectorResizer {}
             header { class: "nf-inspector-head",
                 div { class: "nf-inspector-heading",
                     h2 { class: "nf-inspector-title", "{node.title}" }
@@ -156,6 +220,37 @@ pub fn NodeInspector(
                 }
                 {panel}
                 ClassicLink { id, project_id }
+            }
+        }
+        if let Some(detail) = board_detail {
+            ScreenBoard { detail, viewing, on_close: move |_| board.set(false) }
+        }
+        if let Some(variation) = opened_variation {
+            VariationBoard {
+                project_id: project_id.unwrap_or_default(),
+                variation,
+                screens: plan_screens.clone(),
+                on_view: move |slide_id: i64| variant_viewing.set(Some(slide_id)),
+                on_close: move |_| {
+                    variant_viewing.set(None);
+                    variation_open.set(None);
+                },
+            }
+        }
+        if let Some((current, slides)) = variant_gallery {
+            ScreenGallery {
+                slides,
+                current,
+                on_pick: move |slide_id: i64| variant_viewing.set(Some(slide_id)),
+                on_close: move |_| variant_viewing.set(None),
+            }
+        }
+        if let Some((current, slides)) = gallery {
+            ScreenGallery {
+                slides,
+                current,
+                on_pick: move |screen_id: i64| viewing.set(Some(screen_id)),
+                on_close: move |_| viewing.set(None),
             }
         }
     }
@@ -330,6 +425,15 @@ fn PlanPanel(detail: ProjectDetail) -> Element {
         };
     }
     let style = &project.style;
+    let studio = use_studio();
+    let actions = use_context::<Actions>();
+    let project_id = project.id;
+    let explained: Vec<(String, String)> = style
+        .palette
+        .iter()
+        .enumerate()
+        .filter_map(|(index, color)| style.palette_note(index).map(|note| (color.clone(), note.to_owned())))
+        .collect();
 
     rsx! {
         section { class: "nf-section",
@@ -342,13 +446,53 @@ fn PlanPanel(detail: ProjectDetail) -> Element {
             section { class: "nf-section",
                 h3 { class: "nf-section-title", "Палітра" }
                 div { class: "nf-palette",
-                    for color in style.palette.iter() {
-                        span { key: "{color}", class: "nf-palette-chip",
+                    for (index, color) in style.palette.iter().enumerate() {
+                        span {
+                            key: "{index}",
+                            class: "nf-palette-chip",
+                            title: style.palette_note(index).unwrap_or(color.as_str()),
                             span { class: "nf-palette-color", style: "background: {color};" }
                             "{color}"
                         }
                     }
                 }
+                if !explained.is_empty() {
+                    ul { class: "nf-palette-legend", aria_label: "Звідки кожен колір",
+                        for (index, (color, note)) in explained.into_iter().enumerate() {
+                            li { key: "{index}",
+                                span { class: "nf-palette-dot", style: "background: {color};" }
+                                span { "{note}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !style.look.trim().is_empty() {
+            section { class: "nf-section",
+                h3 { class: "nf-section-title", "Вигляд світу" }
+                p { class: "nf-text", "{style.look}" }
+            }
+        }
+        div { class: "nf-actions",
+            button {
+                class: "nf-button",
+                r#type: "button",
+                title: "Claude заново виведе палітру, шрифти й вигляд зі світу гри, а Claude Design перемалює всі екрани",
+                disabled: actions.locked(),
+                onclick: move |_| {
+                    actions.run("restyle", async move {
+                        bridge::restyle_project(project_id).await.map_err(|problem| explain(&problem))?;
+                        studio.changed();
+                        Ok(())
+                    })
+                },
+                if actions.pending("restyle") {
+                    span { class: "nf-spinner" }
+                } else {
+                    RefreshIcon {}
+                }
+                "Новий стиль і екрани"
             }
         }
         dl { class: "nf-facts",
@@ -412,31 +556,53 @@ fn ReferencesPanel(detail: ProjectDetail, pinterest: Option<PinterestStatus>) ->
                 },
                 "Підтягнути піни"
             }
+            button {
+                class: "nf-button is-quiet",
+                r#type: "button",
+                disabled: actions.locked(),
+                onclick: move |_| {
+                    actions.run("artworks", async move {
+                        artstation_bridge::load_reference_artworks(project_id)
+                            .await
+                            .map_err(|problem| explain_artstation(&problem))?;
+                        studio.changed();
+                        Ok(())
+                    })
+                },
+                "Підтягнути ArtStation"
+            }
         }
         if signed_out {
             p { class: "nf-inspector-lead",
-                "Pinterest не підключено. Увійди в розділі Pinterest класичного режиму — і піни підтягнуться."
+                "Pinterest не підключено. Увійди в розділі Pinterest класичного режиму — і піни підтягнуться. ArtStation працює без входу."
             }
         }
         div { class: "nf-items",
             for (index, reference) in detail.project.references.iter().enumerate() {
                 div { key: "{index}", class: "nf-item",
                     div { class: "nf-item-head",
-                        span { class: if reference.pins.is_empty() && !reference.topic.is_audio() { "nf-led" } else { "nf-led is-done" } }
+                        span { class: if reference.pins.is_empty() && reference.artworks.is_empty() && !reference.topic.is_audio() { "nf-led" } else { "nf-led is-done" } }
                         span { class: "nf-item-title", title: "{reference.title}", "{reference.title}" }
                         span { class: "nf-item-tag", "{reference.topic.label()}" }
                     }
                     if !reference.note.is_empty() {
                         p { class: "nf-item-note", "{reference.note}" }
                     }
-                    if !reference.pins.is_empty() {
+                    if !reference.pins.is_empty() || !reference.artworks.is_empty() {
                         div { class: "nf-pins",
-                            for pin in reference.pins.iter().take(PIN_PREVIEWS) {
+                            for (image, title) in reference
+                                .pins
+                                .iter()
+                                .map(|pin| (pin.image.clone(), pin.title.clone()))
+                                .chain(reference.artworks.iter().map(|artwork| (artwork.image.clone(), artwork.title.clone())))
+                                .take(PIN_PREVIEWS)
+                            {
                                 img {
-                                    key: "{pin.id}{pin.image}",
-                                    src: "{pin.image}",
-                                    alt: "{pin.title}",
+                                    key: "{image}",
+                                    src: "{image}",
+                                    alt: "{title}",
                                     draggable: "false",
+                                    referrerpolicy: "no-referrer",
                                     "loading": "lazy",
                                 }
                             }
@@ -534,21 +700,36 @@ fn SkillsPanel(detail: ProjectDetail, id: NodeId) -> Element {
 }
 
 #[component]
-fn ScreensPanel(detail: ProjectDetail) -> Element {
-    let studio = use_studio();
-    let actions = use_context::<Actions>();
+fn ScreensPanel(detail: ProjectDetail, board: Signal<bool>) -> Element {
+    let count = detail.screens.len();
+    if count == 0 {
+        return rsx! {};
+    }
+    let waiting = detail
+        .screens
+        .iter()
+        .filter(|screen| screen.status == ScreenStatus::Draft)
+        .count();
+    let hidden = count.saturating_sub(MOSAIC_TILES);
+    let more = format!("+{}", hidden + 1);
+    let shown: Vec<Screen> = detail.screens.iter().take(MOSAIC_TILES).cloned().collect();
+    let total = plural(count as u32, SCREEN_WORDS);
+    let hint = if waiting > 0 {
+        format!("{total} · {waiting} чекають апруву")
+    } else {
+        format!("{total} · сіткою по порядку")
+    };
 
     rsx! {
-        div { class: "nf-items",
-            for screen in detail.screens.iter() {
-                div { key: "{screen.id}", class: "nf-item",
-                    div { class: "nf-item-head",
-                        span { class: "nf-led is-{screen_phase(screen.status).code()}" }
-                        span { class: "nf-item-title", title: "{screen.title}", "{screen.title}" }
-                        span { class: "nf-item-status", "{screen_status_label(screen.status)}" }
-                    }
-                    if let Some(html) = &screen.html {
-                        div { class: "nf-preview",
+        button {
+            class: "nf-screens-link",
+            r#type: "button",
+            title: "Відкрити всі екрани гри сіткою",
+            onclick: move |_| board.set(true),
+            div { class: "nf-screens-mosaic",
+                for (at, screen) in shown.iter().enumerate() {
+                    div { key: "{screen.id}", class: "nf-screens-thumb",
+                        if let Some(html) = &screen.html {
                             iframe {
                                 title: "{screen.title}",
                                 tabindex: "-1",
@@ -557,64 +738,176 @@ fn ScreensPanel(detail: ProjectDetail) -> Element {
                                 "srcdoc": "{html}",
                             }
                         }
-                    }
-                    if !screen.summary.is_empty() {
-                        p { class: "nf-item-note", "{screen.summary}" }
-                    }
-                    if let Some(problem) = &screen.error {
-                        p { class: "nf-item-note is-failed", "{explain(problem)}" }
-                    }
-                    div { class: "nf-actions",
-                        if screen.status == ScreenStatus::Draft {
-                            button {
-                                class: "nf-button is-primary",
-                                r#type: "button",
-                                disabled: actions.locked(),
-                                onclick: {
-                                    let screen_id = screen.id;
-                                    move |_| {
-                                        actions.run(format!("approve-{screen_id}"), async move {
-                                            bridge::approve_screen(screen_id)
-                                                .await
-                                                .map_err(|problem| explain(&problem))?;
-                                            studio.changed();
-                                            Ok(())
-                                        })
-                                    }
-                                },
-                                CheckIcon {}
-                                "Апрувнути"
-                            }
-                        }
-                        if matches!(screen.status, ScreenStatus::Draft | ScreenStatus::Approved | ScreenStatus::Failed) {
-                            button {
-                                class: "nf-button is-quiet",
-                                r#type: "button",
-                                disabled: actions.locked(),
-                                onclick: {
-                                    let screen_id = screen.id;
-                                    move |_| {
-                                        actions.run(format!("redo-{screen_id}"), async move {
-                                            bridge::regenerate_screen(screen_id)
-                                                .await
-                                                .map_err(|problem| explain(&problem))?;
-                                            studio.changed();
-                                            Ok(())
-                                        })
-                                    }
-                                },
-                                if actions.pending(&format!("redo-{}", screen.id)) {
-                                    span { class: "nf-spinner" }
-                                } else {
-                                    RefreshIcon {}
-                                }
-                                "Перегенерувати"
-                            }
+                        if hidden > 0 && at + 1 == MOSAIC_TILES {
+                            span { class: "nf-screens-more", "{more}" }
                         }
                     }
                 }
             }
+            span { class: "nf-screens-link-text",
+                span { class: "nf-screens-link-title", "Галерея екранів" }
+                span { class: "nf-screens-link-sub", "{hint}" }
+            }
+            span { class: "nf-screens-link-go", ArrowRightIcon {} }
         }
+    }
+}
+
+#[component]
+fn ScreenBoard(detail: ProjectDetail, viewing: Signal<Option<i64>>, on_close: EventHandler<()>) -> Element {
+    let name = detail.project.name.clone();
+    let total = plural(detail.screens.len() as u32, SCREEN_WORDS);
+    let tiles: Vec<(String, Screen)> = detail
+        .screens
+        .iter()
+        .enumerate()
+        .map(|(index, screen)| (format!("{:02}", index + 1), screen.clone()))
+        .collect();
+
+    rsx! {
+        div {
+            class: "nf-board",
+            role: "dialog",
+            aria_modal: "true",
+            aria_label: "Екрани гри «{name}»",
+            tabindex: "-1",
+            onmounted: move |event| async move {
+                let _ = event.data().set_focus(true).await;
+            },
+            onkeydown: move |event| {
+                if event.key() == Key::Escape {
+                    event.prevent_default();
+                    event.stop_propagation();
+                    on_close.call(());
+                }
+            },
+            header { class: "nf-board-head",
+                h2 { class: "nf-board-title", title: "{name}", "Екрани гри «{name}»" }
+                span { class: "nf-board-count", "{total}" }
+                button {
+                    class: "nf-inspector-close",
+                    r#type: "button",
+                    title: "Закрити (Esc)",
+                    aria_label: "Закрити галерею екранів",
+                    onclick: move |_| on_close.call(()),
+                    CloseIcon {}
+                }
+            }
+            div { class: "nf-board-grid",
+                for (number, screen) in tiles {
+                    article { key: "{screen.id}", class: "nf-board-tile",
+                        if let Some(html) = &screen.html {
+                            button {
+                                class: "nf-preview",
+                                r#type: "button",
+                                title: "Відкрити «{screen.title}» на весь екран",
+                                aria_label: "Відкрити «{screen.title}» на весь екран",
+                                onclick: {
+                                    let screen_id = screen.id;
+                                    let mut viewing = viewing;
+                                    move |_| viewing.set(Some(screen_id))
+                                },
+                                iframe {
+                                    title: "{screen.title}",
+                                    tabindex: "-1",
+                                    "sandbox": "",
+                                    "scrolling": "no",
+                                    "srcdoc": "{html}",
+                                }
+                                span { class: "nf-board-number", "{number}" }
+                                span { class: "nf-preview-hint",
+                                    ExpandIcon {}
+                                    "На весь екран"
+                                }
+                            }
+                        } else {
+                            div { class: "nf-preview",
+                                p { class: "nf-viewer-empty", "{blank_label(screen.status)}" }
+                                span { class: "nf-board-number", "{number}" }
+                            }
+                        }
+                        div { class: "nf-item-head",
+                            span { class: "nf-led is-{screen_phase(screen.status).code()}" }
+                            span { class: "nf-item-title", title: "{screen.title}", "{screen.title}" }
+                            span { class: "nf-item-status", "{screen_status_label(screen.status)}" }
+                        }
+                        if !screen.summary.is_empty() {
+                            p { class: "nf-board-note", title: "{screen.summary}", "{screen.summary}" }
+                        }
+                        if let Some(problem) = &screen.error {
+                            p { class: "nf-item-note is-failed", "{explain(problem)}" }
+                        }
+                        ScreenActions { screen: screen.clone() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ScreenActions(screen: Screen) -> Element {
+    let studio = use_studio();
+    let actions = use_context::<Actions>();
+    let screen_id = screen.id;
+    let redo_key = format!("redo-{screen_id}");
+    let can_redo = matches!(
+        screen.status,
+        ScreenStatus::Draft | ScreenStatus::Approved | ScreenStatus::Failed
+    );
+
+    rsx! {
+        div { class: "nf-actions",
+            if screen.status == ScreenStatus::Draft {
+                button {
+                    class: "nf-button is-primary",
+                    r#type: "button",
+                    disabled: actions.locked(),
+                    onclick: move |_| {
+                        actions.run(format!("approve-{screen_id}"), async move {
+                            bridge::approve_screen(screen_id)
+                                .await
+                                .map_err(|problem| explain(&problem))?;
+                            studio.changed();
+                            Ok(())
+                        })
+                    },
+                    CheckIcon {}
+                    "Апрувнути"
+                }
+            }
+            if can_redo {
+                button {
+                    class: "nf-button is-quiet",
+                    r#type: "button",
+                    disabled: actions.locked(),
+                    onclick: move |_| {
+                        actions.run(format!("redo-{screen_id}"), async move {
+                            bridge::regenerate_screen(screen_id)
+                                .await
+                                .map_err(|problem| explain(&problem))?;
+                            studio.changed();
+                            Ok(())
+                        })
+                    },
+                    if actions.pending(&redo_key) {
+                        span { class: "nf-spinner" }
+                    } else {
+                        RefreshIcon {}
+                    }
+                    "Перегенерувати"
+                }
+            }
+        }
+    }
+}
+
+fn blank_label(status: ScreenStatus) -> &'static str {
+    match status {
+        ScreenStatus::Queued => "Чекає в черзі",
+        ScreenStatus::Generating => "Малюється…",
+        ScreenStatus::Failed => "Не вдалося намалювати",
+        ScreenStatus::Draft | ScreenStatus::Approved => "Цей екран ще не намальовано",
     }
 }
 
@@ -949,17 +1242,178 @@ fn BuildPanel(project_id: i64, overview: Option<BuildOverview>, targets: Vec<Bui
 }
 
 #[component]
+fn PlaytestPanel(project_id: i64, overview: Option<BuildOverview>) -> Element {
+    let actions = use_context::<Actions>();
+    let Some(overview) = overview else {
+        return rsx! {
+            p { class: "nf-inspector-lead", "Завантажую стан збірки…" }
+        };
+    };
+    let playtest = overview.playtest.clone();
+    let run = playtest.run.clone();
+    let active = playtest.is_active();
+    let source_ready = overview
+        .source
+        .as_ref()
+        .is_some_and(|source| source.valid && source.status != SourceStatus::Generating);
+    let can_start = playtest.blocked.is_none() && source_ready && !active;
+    let scenes = run
+        .as_ref()
+        .map(|run| run.scenes.join(" → "))
+        .unwrap_or_default();
+    let activity: Vec<String> = run
+        .as_ref()
+        .map(|run| run.activity.iter().rev().take(ACTIVITY_LINES).rev().cloned().collect())
+        .unwrap_or_default();
+
+    rsx! {
+        if let Some(reason) = &playtest.blocked {
+            p { class: "nf-notice is-warning", "{reason}" }
+        }
+        if run.is_none() && playtest.blocked.is_none() {
+            p { class: "nf-inspector-lead",
+                "Бот студії відкриває гру у вікні 1280×720, сам тисне «Почати», бігає, стрибає, ставить паузу й знімає кадри. "
+                "Claude порівнює їх із макетами Claude Design, виправляє, що криво, і бот перевіряє гру ще раз. Потім ідуть білди."
+            }
+        }
+        if let Some(run) = &run {
+            if let Some(report) = &run.report {
+                section { class: "nf-section",
+                    h3 { class: "nf-section-title", "{report.verdict.label()}" }
+                    if !report.summary.is_empty() {
+                        p { class: "nf-text", "{report.summary}" }
+                    }
+                    if !report.issues.is_empty() {
+                        ul { class: "nf-rows",
+                            for (index, issue) in report.issues.iter().enumerate() {
+                                li { key: "{index}", class: "nf-row nf-issue",
+                                    span {
+                                        class: if issue.fixed { "nf-led is-done" } else { "nf-led is-failed" },
+                                        title: if issue.fixed { "Виправлено" } else { "Лишилось" },
+                                    }
+                                    span { class: "nf-issue-text", "{issue.text}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if run.finished_early {
+                p { class: "nf-item-note is-failed", "Гра закрилась сама раніше, ніж бот дограв." }
+            }
+            if let Some(problem) = &run.error {
+                p { class: "nf-item-note is-failed", "{problem}" }
+            }
+            if !run.shots.is_empty() {
+                section { class: "nf-section",
+                    h3 { class: "nf-section-title", "Кадри бота" }
+                    if !scenes.is_empty() {
+                        p { class: "nf-item-note", "Сцени: {scenes}" }
+                    }
+                    div { class: "nf-shots",
+                        for (index, shot) in run.shots.iter().enumerate() {
+                            figure { key: "{index}", class: if shot.blank { "nf-shot is-blank" } else { "nf-shot" },
+                                img { src: "{shot.thumb}", alt: "{shot.label}", draggable: "false", "loading": "lazy" }
+                                figcaption { class: "nf-shot-caption",
+                                    span { class: "nf-shot-label", title: "{shot.scene}", "{shot.label}" }
+                                    if shot.blank {
+                                        span { class: "nf-shot-flag", "порожній" }
+                                    }
+                                    span { class: "nf-shot-time", "{shot.second} с" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !run.errors.is_empty() {
+                section { class: "nf-section",
+                    h3 { class: "nf-section-title", "Помилки Godot" }
+                    ul { class: "nf-log is-errors",
+                        for (index, line) in run.errors.iter().enumerate() {
+                            li { key: "{index}", title: "{line}", "{line}" }
+                        }
+                    }
+                }
+            }
+            if !activity.is_empty() {
+                section { class: "nf-section",
+                    h3 { class: "nf-section-title", "Хід роботи Claude" }
+                    ul { class: "nf-log",
+                        for (index, line) in activity.into_iter().enumerate() {
+                            li { key: "{index}", title: "{line}", "{line}" }
+                        }
+                    }
+                }
+            }
+        }
+        div { class: "nf-actions",
+            if active {
+                button {
+                    class: "nf-button is-danger",
+                    r#type: "button",
+                    disabled: actions.locked(),
+                    onclick: move |_| {
+                        actions.run("stop-playtest", async move {
+                            build_bridge::stop_playtest(project_id)
+                                .await
+                                .map_err(|problem| explain_build(&problem))
+                        })
+                    },
+                    "Зупинити плейтест"
+                }
+            } else {
+                button {
+                    class: "nf-button is-primary",
+                    r#type: "button",
+                    disabled: actions.locked() || !can_start,
+                    onclick: move |_| {
+                        actions.run("playtest", async move {
+                            build_bridge::start_playtest(project_id)
+                                .await
+                                .map(|_| ())
+                                .map_err(|problem| explain_build(&problem))
+                        })
+                    },
+                    if actions.pending("playtest") {
+                        span { class: "nf-spinner" }
+                    }
+                    if run.is_some() { "Зіграти ще раз" } else { "Запустити плейтест" }
+                }
+            }
+            if run.is_some() {
+                button {
+                    class: "nf-button is-quiet",
+                    r#type: "button",
+                    onclick: move |_| {
+                        actions.run("playtest-folder", async move {
+                            build_bridge::open_folder(project_id, PLAYTEST_FOLDER)
+                                .await
+                                .map_err(|problem| explain_build(&problem))
+                        })
+                    },
+                    ExternalIcon {}
+                    "Відкрити кадри"
+                }
+            }
+        }
+    }
+}
+
+#[component]
 fn ClassicLink(id: NodeId, project_id: Option<i64>) -> Element {
     let studio = use_studio();
     let mode = use_factory_mode();
     let (section, label) = match id {
         NodeId::Prompt => (Section::Pipeline, "Відкрити «Конвеєр гри»"),
-        NodeId::Plan | NodeId::Screens | NodeId::Foundation | NodeId::Skills => {
+        NodeId::Plan | NodeId::Screens | NodeId::Foundation | NodeId::Skills | NodeId::OpenDesign => {
             (Section::ClaudeDesign, "Відкрити в Claude Design")
         }
         NodeId::References => (Section::Pinterest, "Відкрити Pinterest"),
-        NodeId::Code | NodeId::Builds | NodeId::Build(_) => (Section::Build, "Відкрити «Збірку»"),
+        NodeId::Code | NodeId::Playtest | NodeId::Builds | NodeId::Build(_) => (Section::Build, "Відкрити «Збірку»"),
         NodeId::Assets => (Section::ComfyUi, "Відкрити ComfyUI"),
+        NodeId::Finds => (Section::AssetHunt, "Відкрити «Пошук ассетів»"),
+        NodeId::Animations => (Section::Mixamo, "Відкрити Mixamo"),
     };
 
     rsx! {

@@ -180,7 +180,7 @@ pub fn SidebarResizer() -> Element {
     }
 }
 
-fn capture_pointer(event: &PointerEvent) {
+pub(crate) fn capture_pointer(event: &PointerEvent) {
     let pointer = event.data().pointer_id();
     let handle = event
         .data()

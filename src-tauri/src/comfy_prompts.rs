@@ -22,6 +22,7 @@ fn topics_for(kind: AssetKind) -> &'static [ReferenceTopic] {
         AssetKind::Concept => &[
             ReferenceTopic::World,
             ReferenceTopic::Characters,
+            ReferenceTopic::Characters3d,
             ReferenceTopic::Light,
             ReferenceTopic::Props,
         ],
@@ -29,17 +30,24 @@ fn topics_for(kind: AssetKind) -> &'static [ReferenceTopic] {
             ReferenceTopic::Characters,
             ReferenceTopic::Props,
             ReferenceTopic::Animation,
+            ReferenceTopic::VfxSprites,
         ],
         AssetKind::Texture => &[ReferenceTopic::Materials, ReferenceTopic::World],
-        AssetKind::Effect => &[ReferenceTopic::Vfx, ReferenceTopic::Light],
+        AssetKind::Effect => &[
+            ReferenceTopic::Vfx,
+            ReferenceTopic::VfxSprites,
+            ReferenceTopic::Light,
+        ],
         AssetKind::Interface => &[
             ReferenceTopic::Interface,
+            ReferenceTopic::MainMenu,
             ReferenceTopic::Panels,
             ReferenceTopic::Buttons,
             ReferenceTopic::Icons,
         ],
         AssetKind::Model => &[
             ReferenceTopic::Characters,
+            ReferenceTopic::Characters3d,
             ReferenceTopic::Props,
             ReferenceTopic::Materials,
         ],
@@ -287,6 +295,7 @@ mod tests {
             fonts: "Unbounded".into(),
             corner_radius: 8,
             mood: "нуар під дощем".into(),
+            ..StyleGuide::default()
         };
         let references = vec![
             Reference {
@@ -296,6 +305,7 @@ mod tests {
                 query: "game vfx ember sparks".into(),
                 palette: vec!["#f2aa4c".into()],
                 pins: Vec::new(),
+                artworks: Vec::new(),
             },
             Reference {
                 topic: ReferenceTopic::Sounds,
@@ -304,6 +314,7 @@ mod tests {
                 query: "dry metallic creak".into(),
                 palette: Vec::new(),
                 pins: Vec::new(),
+                artworks: Vec::new(),
             },
         ];
         let project = ProjectStyle {

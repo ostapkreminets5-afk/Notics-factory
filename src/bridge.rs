@@ -182,10 +182,19 @@ pub async fn listen(event: &str, mut on_event: impl FnMut() + 'static) -> Option
     })
 }
 
-fn desktop_shell_present() -> bool {
+pub(crate) fn desktop_shell_present() -> bool {
     web_sys::window()
         .and_then(|window| js_sys::Reflect::get(&window, &JsValue::from_str("__TAURI__")).ok())
         .is_some_and(|tauri| tauri.is_object())
+}
+
+#[derive(Serialize)]
+struct ZoomArgs {
+    scale: f64,
+}
+
+pub async fn set_ui_zoom(scale: f64) -> Result<(), JsValue> {
+    invoke("set_ui_zoom", &ZoomArgs { scale }).await
 }
 
 pub(crate) async fn invoke<A: Serialize, T: DeserializeOwned>(command: &str, args: &A) -> Result<T, JsValue> {
@@ -220,6 +229,12 @@ pub async fn studio_settings() -> Result<StudioSettings, StudioError> {
 
 pub async fn pick_references(project_id: i64) -> Result<Project, StudioError> {
     invoke("pick_references", &IdArgs { id: project_id })
+        .await
+        .map_err(studio_error)
+}
+
+pub async fn restyle_project(project_id: i64) -> Result<Project, StudioError> {
+    invoke("restyle_project", &IdArgs { id: project_id })
         .await
         .map_err(studio_error)
 }
